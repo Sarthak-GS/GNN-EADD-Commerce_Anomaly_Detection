@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# PyTorch checkpoints
+*.pt
+*.pth
+
+# Results directory (optional if you want to exclude generated images/data)
+# results/ 
