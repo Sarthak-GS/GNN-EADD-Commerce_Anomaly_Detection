@@ -7,8 +7,8 @@ __pycache__/
 .idea/
 
 # PyTorch checkpoints
-*.pt
-*.pth
+# *.pt
+# *.pth
 
 # Results directory (optional if you want to exclude generated images/data)
 # results/ 
