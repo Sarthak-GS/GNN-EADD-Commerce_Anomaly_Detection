@@ -22,10 +22,10 @@ import torch
 import torch.optim as optim
 import numpy as np
 import argparse
+import time
 from pathlib import Path
 from typing import Optional
-
-from data.graph_builder import generate_synthetic_graph, build_global_adjacency
+from data.graph_builder import build_global_adjacency
 from models.gae import GraphAutoEncoder
 from models.gat import GraphAttentionNetwork
 from utils.utils import (
@@ -72,6 +72,7 @@ def train_gae(
     print("  STAGE 1: GAE Unsupervised Training")
     print(f"{'='*60}")
 
+    start_time = time.time()
     gae.train()
     for epoch in range(1, n_epochs + 1):
         optimizer.zero_grad()
@@ -87,8 +88,9 @@ def train_gae(
         if epoch % log_every == 0 or epoch == 1:
             print(f"  [GAE E{epoch:>4}]  recon_loss = {loss.item():.6f}")
 
-    print(f"  GAE training done. Final loss: {losses[-1]:.6f}")
-    return losses
+    train_time = time.time() - start_time
+    print(f"  GAE training done in {train_time:.3f}s. Final loss: {losses[-1]:.6f}")
+    return losses, train_time
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ def train_gat(
     print("  STAGE 2: GAT Semi-supervised Training")
     print(f"{'='*60}")
 
+    start_time = time.time()
     gat.train()
     for epoch in range(1, n_epochs + 1):
         optimizer.zero_grad()
@@ -141,8 +144,9 @@ def train_gat(
                 f"sup={l_sup.item():.5f}  unsup={l_unsup.item():.5f}"
             )
 
-    print(f"  GAT training done. Final loss: {history[-1][0]:.5f}")
-    return history
+    train_time = time.time() - start_time
+    print(f"  GAT training done in {train_time:.3f}s. Final loss: {history[-1][0]:.5f}")
+    return history, train_time
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -192,14 +196,12 @@ def run_training(args):
     device = select_device()
 
     # ── DATA ──────────────────────────────────────────────────────────────────
-    print("\n[Data] Building synthetic heterogeneous e-commerce graph...")
-    graph = generate_synthetic_graph(
-        n_products=args.n_products,
-        n_users=args.n_users,
-        n_sellers=args.n_sellers,
-        anomaly_fraction=args.anomaly_fraction,
-        seed=args.seed,
-    )
+    print(f"\n[Data] Loading graph from {args.graph_path}...")
+    graph_path = Path(args.graph_path)
+    if not graph_path.exists():
+        raise FileNotFoundError(f"Graph file not found: {args.graph_path}. Please run generate_data.py first.")
+    
+    graph = torch.load(graph_path)
 
     # Feature matrix H^(0): [N, feat_dim]
     H = build_homogeneous_features(graph, device)
@@ -234,7 +236,7 @@ def run_training(args):
         edge_types = EDGE_TYPES,
     ).to(device)
 
-    gae_losses = train_gae(
+    gae_losses, gae_time = train_gae(
         gae, H, A, A_norm_per_type,
         n_epochs  = args.gae_epochs,
         lr        = args.lr,
@@ -256,7 +258,7 @@ def run_training(args):
         edge_types = EDGE_TYPES,
     ).to(device)
 
-    gat_history = train_gat(
+    gat_history, gat_time = train_gat(
         gat, Z, A, A_per_type, y, labeled_mask,
         n_epochs  = args.gat_epochs,
         lr        = args.lr,
@@ -290,18 +292,20 @@ def run_training(args):
         'metrics_test': metrics_test,
         'gae_losses': gae_losses,
         'gat_history': gat_history,
+        'times': {'gae': gae_time, 'gat': gat_time},
     }, results_dir / 'checkpoint.pt')
     print(f"\n[Saved] checkpoint -> {results_dir / 'checkpoint.pt'}")
+
+    # Inject times into the metrics dict for run_all wrapper
+    metrics_test['gae_time'] = gae_time
+    metrics_test['gat_time'] = gat_time
 
     return gae, gat, Z, A_per_type, graph, metrics_test
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="GNN-EADD Phase 1 Training")
-    p.add_argument('--n_products',       type=int,   default=200)
-    p.add_argument('--n_users',          type=int,   default=80)
-    p.add_argument('--n_sellers',        type=int,   default=20)
-    p.add_argument('--anomaly_fraction', type=float, default=0.15)
+    p.add_argument('--graph_path',       type=str,   default='data/graph.pt', help='Path to pre-generated graph file')
     p.add_argument('--embed_dim',        type=int,   default=128)
     p.add_argument('--hidden_dim',       type=int,   default=64)
     p.add_argument('--gae_epochs',       type=int,   default=200)

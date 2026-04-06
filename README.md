@@ -9,6 +9,7 @@ The project detects anomalous behaviour in an e-commerce platform using a dual-s
 2. **Stage 2 (Semi-Supervised)**: A Type-Specific Graph Attention Network (GAT) uses the frozen embeddings to classify anomalies, guided by labeled data and a smoothness penalty (connected nodes share similar scores).
 
 ## Structure
+- `generate_data.py`: Creates the synthetic graph and saves it to a file.
 - `data/graph_builder.py`: Generates the synthetic heterogeneous graph.
 - `models/gae.py`: Stage 1 Unsupervised PyTorch models.
 - `models/gat.py`: Stage 2 Semi-supervised PyTorch models.
@@ -32,14 +33,19 @@ pip install -r requirements.txt
 ```
 
 ### 3. Run the Pipeline
-To run the complete pipeline (Data generation -> GAE -> GAT -> Plotting -> Metric evaluation):
+The graph generation is now decoupled from model training. First, generate the synthetic graph data:
 ```bash
-python run_all.py
+python generate_data.py --output data/graph.pt
+```
+
+Then, to run the complete pipeline (GAE -> GAT -> Plotting -> Metric evaluation):
+```bash
+python run_all.py --graph_path data/graph.pt
 ```
 
 ## Using Your Own Dataset
 
-If you want to train the model manually on a custom dataset rather than the synthetic graph, you need to replace the output of `generate_synthetic_graph()` with your own `HeteroGraph` object.
+If you want to train the model manually on a custom dataset rather than the synthetic graph, you need to save your own `HeteroGraph` object as a `.pt` file and pass it to the training scripts.
 
 ### Steps to Integrate Custom Data:
 
@@ -72,7 +78,7 @@ If you want to train the model manually on a custom dataset rather than the synt
        # Add other relations...
    }
 
-   # 3. Instantiate
+   # 3. Instantiate and save
    custom_graph = HeteroGraph(
        x_dict=x_dict,
        edge_index_dict=edge_index_dict,
@@ -83,5 +89,34 @@ If you want to train the model manually on a custom dataset rather than the synt
        val_mask=torch.tensor(val_mask, dtype=torch.bool),
        test_mask=torch.tensor(test_mask, dtype=torch.bool)
    )
+   
+   # Save the graph
+   torch.save(custom_graph, "data/my_custom_graph.pt")
    ```
-5. **Feed it to `train.py`:** You can then pass this `custom_graph` to the training pipeline in `train.py` instead of the synthetic generator.
+5. **Feed it to the pipeline:** You can then pass this saved file to the training pipeline using the `--graph_path` argument:
+   ```bash
+   python train.py --graph_path data/my_custom_graph.pt
+   ```
+
+## Command-Line Arguments
+
+The pipeline is highly customizable. You can modify the architecture and training parameters using the following CLI arguments:
+
+### Graph Generation (`generate_data.py`)
+- `--n_products` (default: 200): Number of product nodes to generate.
+- `--n_users` (default: 80): Number of user nodes to generate.
+- `--n_sellers` (default: 20): Number of seller nodes to generate.
+- `--anomaly_fraction` (default: 0.15): Ratio of anomalous nodes.
+- `--seed` (default: 42): Random seed for reproducibility.
+- `--output` (default: `data/graph.pt`): Where to save the generated graph.
+
+### Training & Evaluation (`run_all.py` / `train.py`)
+- `--graph_path` (default: `data/graph.pt`): Path to the generated graph file.
+- `--gae_epochs` (default: 200): Total epochs for Stage 1 Unsupervised Training.
+- `--gat_epochs` (default: 100): Total epochs for Stage 2 Semi-Supervised Training.
+- `--embed_dim` (default: 128): Size of the node embeddings from the Stage 1 GAE.
+- `--hidden_dim` (default: 64): Internal hidden dimension size for the Stage 2 GAT.
+- `--lr` (default: 1e-3): Learning rate for both models.
+- `--lam` (default: 0.5): Lambda hyperparameter controlling the balance between the supervised loss and the unsupervised smoothness penalty.
+- `--results_dir` (default: `results`): Directory to save plots.
+- `--skip_baselines`: Add this flag to run_all.py to skip executing the PyTorch Geometric reference baseline.
