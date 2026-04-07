@@ -37,7 +37,7 @@ from utils.utils import (
 )
 
 
-EDGE_TYPES = ['purchase', 'sell', 'interact', 'self']
+EDGE_TYPES = ['purchase', 'sell', 'interact']
 
 
 def select_device() -> torch.device:
@@ -77,8 +77,8 @@ def train_gae(
     for epoch in range(1, n_epochs + 1):
         optimizer.zero_grad()
 
-        Z, A_hat = gae(H, A_norm_per_type)
-        loss = gae.reconstruction_loss(A, A_hat)
+        Z, A_hat_logits = gae(H, A_norm_per_type)
+        loss = gae.reconstruction_loss(A, A_hat_logits)
 
         loss.backward()
         optimizer.step()

@@ -25,6 +25,84 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def build_edge_indices(graph: HeteroGraph) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    """
+    Returns a dict {rel_name -> edge_index [2, E]} in global node space,
+    plus a combined edge_index for the full graph.
+    """
+    N_P = graph.num_nodes_per_type['product']
+    N_U = graph.num_nodes_per_type['user']
+
+    off = {'product': 0, 'user': N_P, 'seller': N_P + N_U}
+
+    rel_map = {
+        ('product', 'purchase', 'user'): 'purchase',
+        ('seller',  'sell',    'product'): 'sell',
+        ('user',    'interact', 'user'): 'interact',
+    }
+
+    per_type = {}
+    all_parts = []
+
+    for (src_t, rel, dst_t), name in rel_map.items():
+        ei = graph.edge_index_dict.get((src_t, rel, dst_t),
+                                       torch.zeros(2, 0, dtype=torch.long))
+        if ei.numel() == 0:
+            per_type[name] = torch.zeros(2, 0, dtype=torch.long)
+            continue
+        src = ei[0] + off[src_t]
+        dst = ei[1] + off[dst_t]
+        fwd = torch.stack([src, dst], dim=0)
+        bwd = torch.stack([dst, src], dim=0)
+        per_type[name] = torch.cat([fwd, bwd], dim=1)   # undirected
+        all_parts.append(per_type[name])
+
+    combined = torch.cat(all_parts, dim=1) if all_parts else torch.zeros(2, 0, dtype=torch.long)
+    return per_type, combined
+
+
+def build_sparse_adj_matrices(
+    per_type_ei: Dict[str, torch.Tensor], 
+    num_nodes: int,
+    normalized: bool = True
+) -> Dict[str, torch.Tensor]:
+    """
+    Builds one PyTorch sparse_coo_tensor per edge relation type for the GAE.
+    Adds self-loops before normalization.
+    """
+    A_dict = {}
+    idx_self = torch.arange(num_nodes)
+    self_loop = torch.stack([idx_self, idx_self], dim=0)
+    
+    for r, ei in per_type_ei.items():
+        if r == 'self':
+            continue
+        # Add self loop
+        ei_with_self = torch.cat([ei, self_loop], dim=1)
+        
+        # Build values
+        v = torch.ones(ei_with_self.size(1), dtype=torch.float32)
+        
+        if normalized:
+            # compute degrees
+            deg = torch.zeros(num_nodes, dtype=torch.float32)
+            deg.scatter_add_(0, ei_with_self[0], v)
+            
+            deg_inv_sqrt = deg.pow(-0.5)
+            deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
+            
+            # D^{-1/2} A D^{-1/2}
+            src = ei_with_self[0]
+            dst = ei_with_self[1]
+            v = deg_inv_sqrt[src] * v * deg_inv_sqrt[dst]
+        
+        A_sp = torch.sparse_coo_tensor(ei_with_self, v, (num_nodes, num_nodes)).coalesce()
+        A_dict[r] = A_sp
+        
+    return A_dict
+
+
+
 def build_per_type_adj_matrices(
     graph: HeteroGraph,
     normalized: bool = True,
@@ -46,10 +124,7 @@ def build_per_type_adj_matrices(
     N_S = graph.num_nodes_per_type['seller']
     N   = N_P + N_U + N_S
 
-    A_dict = {r: torch.zeros(N, N) for r in ['purchase', 'sell', 'interact', 'self']}
-
-    # Self-loops
-    A_dict['self'].fill_diagonal_(1.0)
+    A_dict = {r: torch.zeros(N, N) for r in ['purchase', 'sell', 'interact']}
 
     # Purchase: P ↔ U
     ei = graph.edge_index_dict.get(('product', 'purchase', 'user'), torch.zeros(2, 0, dtype=torch.long))
@@ -57,6 +132,7 @@ def build_per_type_adj_matrices(
         gp, gu = p, N_P + u
         A_dict['purchase'][gp, gu] = 1.0
         A_dict['purchase'][gu, gp] = 1.0
+    A_dict['purchase'].fill_diagonal_(1.0)
 
     # Sell: S ↔ P
     ei = graph.edge_index_dict.get(('seller', 'sell', 'product'), torch.zeros(2, 0, dtype=torch.long))
@@ -64,12 +140,14 @@ def build_per_type_adj_matrices(
         gs, gp = N_P + N_U + s, p
         A_dict['sell'][gs, gp] = 1.0
         A_dict['sell'][gp, gs] = 1.0
+    A_dict['sell'].fill_diagonal_(1.0)
 
     # Interact: U ↔ U
     ei = graph.edge_index_dict.get(('user', 'interact', 'user'), torch.zeros(2, 0, dtype=torch.long))
     for u1, u2 in zip(ei[0].tolist(), ei[1].tolist()):
         gu1, gu2 = N_P + u1, N_P + u2
         A_dict['interact'][gu1, gu2] = 1.0
+    A_dict['interact'].fill_diagonal_(1.0)
 
     if normalized:
         return {r: _sym_normalize(A) for r, A in A_dict.items()}

@@ -204,7 +204,7 @@ class GraphAttentionNetwork(nn.Module):
         # s_i - s_j for all pairs: [N, N]
         diff = s.unsqueeze(1) - s.unsqueeze(0)    # [N, N]
         sq   = diff ** 2                           # [N, N]
-        return (A * sq).sum() / (A.sum() + 1e-8)  # normalized by edge count
+        return (A * sq).mean()  # consistent with L_sup which also uses mean
 
     @staticmethod
     def combined_loss(

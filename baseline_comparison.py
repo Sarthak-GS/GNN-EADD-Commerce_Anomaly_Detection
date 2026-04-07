@@ -104,10 +104,10 @@ class PyGTypeSpecificEncoder(nn.Module):
         from torch_geometric.nn import GCNConv
         self.edge_types = edge_types
         # Layer 1
-        self.W1 = nn.ModuleDict({r: GCNConv(in_dim,    hidden_dim, add_self_loops=False)
+        self.W1 = nn.ModuleDict({r: GCNConv(in_dim,    hidden_dim, add_self_loops=True)
                                   for r in edge_types})
         # Layer 2
-        self.W2 = nn.ModuleDict({r: GCNConv(hidden_dim, embed_dim,  add_self_loops=False)
+        self.W2 = nn.ModuleDict({r: GCNConv(hidden_dim, embed_dim,  add_self_loops=True)
                                   for r in edge_types})
 
     def forward(self, x, per_type_ei):
@@ -124,16 +124,16 @@ class PyGTypeSpecificEncoder(nn.Module):
 
 def _inner_product_decode(z):
     """Â = σ(Z Zᵀ) — same as our GAEDecoder."""
-    return torch.sigmoid(z @ z.t())
+    return z @ z.t()
 
 
 def _recon_loss(A, A_hat):
     """Same weighted BCE as our GraphAutoEncoder.reconstruction_loss."""
     n_pos = A.sum()
     n_neg = A.numel() - n_pos
-    pos_weight = (n_neg / (n_pos + 1e-8)).clamp(max=10.0)
+    pos_weight = (n_neg / (n_pos + 1e-8)).clamp(max=50.0)
     return F.binary_cross_entropy_with_logits(
-        A_hat.logit(eps=1e-6), A,
+        A_hat, A,
         pos_weight=torch.as_tensor(float(pos_weight), device=A.device),
         reduction='mean',
     )
@@ -187,10 +187,10 @@ class PyGTypeSpecificGAT(nn.Module):
         from torch_geometric.nn import GATConv
         self.edge_types = edge_types
         # Layer 1
-        self.gat1 = nn.ModuleDict({r: GATConv(embed_dim,  hidden_dim, heads=1, add_self_loops=False)
+        self.gat1 = nn.ModuleDict({r: GATConv(embed_dim,  hidden_dim, heads=1, add_self_loops=True)
                                     for r in edge_types})
         # Layer 2
-        self.gat2 = nn.ModuleDict({r: GATConv(hidden_dim, hidden_dim, heads=1, add_self_loops=False)
+        self.gat2 = nn.ModuleDict({r: GATConv(hidden_dim, hidden_dim, heads=1, add_self_loops=True)
                                     for r in edge_types})
         self.score_head = nn.Linear(hidden_dim, 1)
 
@@ -224,7 +224,7 @@ def _sup_loss(s, y, mask):
 def _unsup_loss(s, A_dense):
     """Same smoothness loss as GraphAttentionNetwork.unsupervised_loss."""
     diff = s.unsqueeze(1) - s.unsqueeze(0)
-    return (A_dense * diff**2).sum() / (A_dense.sum() + 1e-8)
+    return (A_dense * diff**2).mean()
 
 
 def train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device):
