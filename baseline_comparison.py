@@ -23,9 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import time
 from pathlib import Path
 
-from data.graph_builder import generate_synthetic_graph
+
 from utils.utils import (
     set_seed, build_homogeneous_features, compute_metrics,
 )
@@ -103,10 +104,10 @@ class PyGTypeSpecificEncoder(nn.Module):
         from torch_geometric.nn import GCNConv
         self.edge_types = edge_types
         # Layer 1
-        self.W1 = nn.ModuleDict({r: GCNConv(in_dim,    hidden_dim, add_self_loops=False)
+        self.W1 = nn.ModuleDict({r: GCNConv(in_dim,    hidden_dim, add_self_loops=True)
                                   for r in edge_types})
         # Layer 2
-        self.W2 = nn.ModuleDict({r: GCNConv(hidden_dim, embed_dim,  add_self_loops=False)
+        self.W2 = nn.ModuleDict({r: GCNConv(hidden_dim, embed_dim,  add_self_loops=True)
                                   for r in edge_types})
 
     def forward(self, x, per_type_ei):
@@ -123,16 +124,16 @@ class PyGTypeSpecificEncoder(nn.Module):
 
 def _inner_product_decode(z):
     """Â = σ(Z Zᵀ) — same as our GAEDecoder."""
-    return torch.sigmoid(z @ z.t())
+    return z @ z.t()
 
 
 def _recon_loss(A, A_hat):
     """Same weighted BCE as our GraphAutoEncoder.reconstruction_loss."""
     n_pos = A.sum()
     n_neg = A.numel() - n_pos
-    pos_weight = (n_neg / (n_pos + 1e-8)).clamp(max=10.0)
+    pos_weight = (n_neg / (n_pos + 1e-8)).clamp(max=50.0)
     return F.binary_cross_entropy_with_logits(
-        A_hat.logit(eps=1e-6), A,
+        A_hat, A,
         pos_weight=torch.as_tensor(float(pos_weight), device=A.device),
         reduction='mean',
     )
@@ -151,6 +152,7 @@ def train_pyg_stage1(H, A_dense, per_type_ei, device):
     opt = torch.optim.Adam(encoder.parameters(), lr=LR)
 
     print(f"  [PyG] Stage 1: Training type-specific GAE ({GAE_EPOCHS} epochs)...")
+    start_time = time.time()
     encoder.train()
     for ep in range(1, GAE_EPOCHS + 1):
         opt.zero_grad()
@@ -165,8 +167,10 @@ def train_pyg_stage1(H, A_dense, per_type_ei, device):
     encoder.eval()
     with torch.no_grad():
         Z_frozen = encoder(H, per_type_ei).detach()
-    print(f"  [PyG] Stage 1 done. Z shape: {Z_frozen.shape}")
-    return Z_frozen
+        
+    train_time = time.time() - start_time
+    print(f"  [PyG] Stage 1 done in {train_time:.3f}s. Z shape: {Z_frozen.shape}")
+    return Z_frozen, train_time
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,10 +187,10 @@ class PyGTypeSpecificGAT(nn.Module):
         from torch_geometric.nn import GATConv
         self.edge_types = edge_types
         # Layer 1
-        self.gat1 = nn.ModuleDict({r: GATConv(embed_dim,  hidden_dim, heads=1, add_self_loops=False)
+        self.gat1 = nn.ModuleDict({r: GATConv(embed_dim,  hidden_dim, heads=1, add_self_loops=True)
                                     for r in edge_types})
         # Layer 2
-        self.gat2 = nn.ModuleDict({r: GATConv(hidden_dim, hidden_dim, heads=1, add_self_loops=False)
+        self.gat2 = nn.ModuleDict({r: GATConv(hidden_dim, hidden_dim, heads=1, add_self_loops=True)
                                     for r in edge_types})
         self.score_head = nn.Linear(hidden_dim, 1)
 
@@ -220,7 +224,7 @@ def _sup_loss(s, y, mask):
 def _unsup_loss(s, A_dense):
     """Same smoothness loss as GraphAttentionNetwork.unsupervised_loss."""
     diff = s.unsqueeze(1) - s.unsqueeze(0)
-    return (A_dense * diff**2).sum() / (A_dense.sum() + 1e-8)
+    return (A_dense * diff**2).mean()
 
 
 def train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device):
@@ -228,6 +232,7 @@ def train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device):
     opt   = torch.optim.Adam(model.parameters(), lr=LR)
 
     print(f"  [PyG] Stage 2: Training type-specific GAT ({GAT_EPOCHS} epochs)...")
+    start_time = time.time()
     model.train()
     for ep in range(1, GAT_EPOCHS + 1):
         opt.zero_grad()
@@ -244,20 +249,27 @@ def train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device):
     model.eval()
     with torch.no_grad():
         scores = model(Z_frozen, per_type_ei).cpu().numpy()
-    print(f"  [PyG] Stage 2 done.")
-    return scores
+        
+    train_time = time.time() - start_time
+    print(f"  [PyG] Stage 2 done in {train_time:.3f}s.")
+    return scores, train_time
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_baseline_comparison():
+def run_baseline_comparison(graph_path: str = 'data/graph.pt'):
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[Baselines] Device: {device}")
 
-    graph = generate_synthetic_graph(seed=42)
+    path = Path(graph_path)
+    if not path.exists():
+        print(f"[!] Graph file not found: {graph_path}. Please run generate_data.py first.")
+        return
+
+    graph = torch.load(path)
     H     = build_homogeneous_features(graph, device)
     y     = graph.y.to(device)
     labeled_mask = graph.labeled_mask.to(device)
@@ -278,13 +290,16 @@ def run_baseline_comparison():
         print("  [!] PyG not installed. Run:  pip install torch-geometric")
         return
 
-    Z_frozen = train_pyg_stage1(H, A_dense, per_type_ei, device)
-    scores   = train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device)
+    Z_frozen, pyg_gae_time = train_pyg_stage1(H, A_dense, per_type_ei, device)
+    scores, pyg_gat_time   = train_pyg_stage2(Z_frozen, A_dense, per_type_ei, y, labeled_mask, device)
 
     # Evaluate on same held-out test split
     test_np   = test_mask.numpy()
     y_np      = graph.y.numpy()
     metrics_pyg = compute_metrics(scores[test_np], y_np[test_np])
+    metrics_pyg['gae_time'] = pyg_gae_time
+    metrics_pyg['gat_time'] = pyg_gat_time
+    
     print(f"\n  [PyG Test] AUC-ROC: {metrics_pyg['auc_roc']:.4f}  "
           f"AUC-PR: {metrics_pyg['auc_pr']:.4f}  F1: {metrics_pyg['f1']:.4f}")
 
@@ -318,4 +333,8 @@ def run_baseline_comparison():
 
 
 if __name__ == '__main__':
-    run_baseline_comparison()
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--graph_path', type=str, default='data/graph.pt')
+    args = p.parse_args()
+    run_baseline_comparison(args.graph_path)

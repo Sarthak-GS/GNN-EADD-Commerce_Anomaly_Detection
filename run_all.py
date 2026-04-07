@@ -9,6 +9,7 @@ run_all.py  —  Master script that runs the complete GNN-EADD Phase 1 pipeline:
   7. Prints final Phase 1 summary
 
 Usage:
+    python generate_data.py --output data/graph.pt
     python run_all.py
     python run_all.py --gae_epochs 50 --gat_epochs 30  # fast demo
 """
@@ -25,7 +26,6 @@ from pathlib import Path
 from train import run_training
 from visualize import make_all_plots
 from baseline_comparison import run_baseline_comparison
-from data.graph_builder import generate_synthetic_graph
 from utils.utils import set_seed, build_per_type_adj_matrices, build_homogeneous_features
 
 
@@ -38,10 +38,7 @@ def main():
     p.add_argument('--hidden_dim',       type=int,   default=64)
     p.add_argument('--lr',               type=float, default=1e-3)
     p.add_argument('--lam',              type=float, default=0.5)
-    p.add_argument('--n_products',       type=int,   default=200)
-    p.add_argument('--n_users',          type=int,   default=80)
-    p.add_argument('--n_sellers',        type=int,   default=20)
-    p.add_argument('--anomaly_fraction', type=float, default=0.15)
+    p.add_argument('--graph_path',       type=str,   default='data/graph.pt')
     p.add_argument('--seed',             type=int,   default=42)
     p.add_argument('--results_dir',      type=str,   default='results')
     p.add_argument('--skip_baselines',   action='store_true')
@@ -77,7 +74,7 @@ def main():
 
     # ── BASELINES ────────────────────────────────────────────────────────────
     if not args.skip_baselines:
-        run_baseline_comparison()
+        run_baseline_comparison(args.graph_path)
 
     # ── PHASE 1 SUMMARY ──────────────────────────────────────────────────────
     print("\n" + "█"*64)
@@ -97,7 +94,19 @@ def main():
     print(f"  │ Precision@K         │  {metrics_all['prec_at_k']:.4f}  │")
     print(f"  │ Recall@K            │  {metrics_all['recall_at_k']:.4f}  │")
     print(f"  └─────────────────────┴──────────┘")
-    print()
+    baseline_path = Path(args.results_dir) / 'baseline_pyg_metrics.npy'
+    if not args.skip_baselines and baseline_path.exists():
+        metrics_pyg = np.load(baseline_path, allow_pickle=True).item()
+        print(f"  ┌─────────────────────┬───────────┬───────────┐")
+        print(f"  │ Runtime Comparison  │ Ours (s)  │ PyG (s)   │")
+        print(f"  ├─────────────────────┼───────────┼───────────┤")
+        print(f"  │ Stage 1 (GAE)       │ {metrics_all.get('gae_time', 0.0):>9.3f} │ {metrics_pyg.get('gae_time', 0.0):>9.3f} │")
+        print(f"  │ Stage 2 (GAT)       │ {metrics_all.get('gat_time', 0.0):>9.3f} │ {metrics_pyg.get('gat_time', 0.0):>9.3f} │")
+        print(f"  ├─────────────────────┼───────────┼───────────┤")
+        print(f"  │ Total Time          │ {(metrics_all.get('gae_time', 0.0) + metrics_all.get('gat_time', 0.0)):>9.3f} │ {(metrics_pyg.get('gae_time', 0.0) + metrics_pyg.get('gat_time', 0.0)):>9.3f} │")
+        print(f"  └─────────────────────┴───────────┴───────────┘")
+        print()
+
     print(f"  Plots saved to: {args.results_dir}/")
     print(f"    • loss_curves.png")
     print(f"    • anomaly_scores.png")
