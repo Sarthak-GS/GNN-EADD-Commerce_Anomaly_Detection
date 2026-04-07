@@ -4,6 +4,5 @@ scikit-learn>=1.3.0
 matplotlib>=3.7.0
 networkx>=3.1
 
-# Optional - PyTorch Geometric (3rd-party GPU framework, required for baseline)
-# Install separately after torch:
-#   pip install torch-geometric
+# PyTorch Geometric (3rd-party GPU framework for baseline comparison)
+torch-geometric>=2.4.0
