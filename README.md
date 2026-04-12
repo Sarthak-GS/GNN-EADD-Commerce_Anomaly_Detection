@@ -1,122 +1,94 @@
 # GNN-EADD: E-Commerce Anomaly Detection
 
-This repository implements the Phase 1 pipeline for **GNN-EADD** (Graph Neural Network - E-commerce Anomaly Detection using Dual-stage training).
+Detects anomalous behaviour in e-commerce platforms using a dual-stage heterogeneous Graph Neural Network. Phase 2 adds GPU-parallel CUDA kernels, an OpenMP CPU baseline, an asymmetric MLP decoder, and a full timing benchmark.
 
 ## Overview
 
-The project detects anomalous behaviour in an e-commerce platform using a dual-stage heterogeneous Graph Neural Network.
-1. **Stage 1 (Unsupervised)**: A Graph Auto-Encoder (GAE) learns representations (embeddings) of nodes (Users, Products, Sellers) purely based on graph structure.
-2. **Stage 2 (Semi-Supervised)**: A Type-Specific Graph Attention Network (GAT) uses the frozen embeddings to classify anomalies, guided by labeled data and a smoothness penalty (connected nodes share similar scores).
+1. Stage 1 (Unsupervised): Graph Auto-Encoder (GAE) learns node embeddings from graph structure. Supports symmetric inner-product decoder or asymmetric MLP decoder.
+2. Stage 2 (Semi-Supervised): Type-specific GAT classifies anomalies using frozen embeddings + a small label set. Smoothness loss computed via thread-per-edge parallel kernel (Kernel 1).
 
-## Structure
-- `generate_data.py`: Creates the synthetic graph and saves it to a file.
-- `data/graph_builder.py`: Generates the synthetic heterogeneous graph.
-- `models/gae.py`: Stage 1 Unsupervised PyTorch models.
-- `models/gat.py`: Stage 2 Semi-supervised PyTorch models.
-- `train.py`: Main dual-stage training loop.
-- `baseline_comparison.py`: Evaluates against PyTorch Geometric references.
-- `visualize.py`: Generates plots (Loss curves, Anomaly distributions, Graph visualisations).
-- `run_all.py`: Runs the entire pipeline sequentially.
+## File Structure
 
-## Setup & Execution
+```
+models/
+  gae.py              Stage 1 GAE (inner_product or mlp decoder)
+  gat.py              Stage 2 GAT
+  mlp_decoder.py      Asymmetric MLP decoder for directed edges
 
-### 1. Activating the Environment
-Before running the code, ensure you have your Python environment activated. If you are using Conda, activate the environment where PyTorch is installed:
-```bash
-conda activate env_name
+kernels/
+  cuda_ops.py         3 thread-per-edge GPU-compatible kernels
+  openmp_ops.py       OpenMP CPU wrappers (with PyTorch fallback)
+  openmp_kernels.c    C source compiled to openmp_ext.so
+  build_ext.py        Compile script for OpenMP extension
+
+data/graph_builder.py Synthetic heterogeneous graph construction
+train.py              Dual-stage training loop (all modes)
+run_all.py            Full pipeline orchestrator
+benchmark.py          Kernel timing comparison table
+baseline_comparison.py PyTorch Geometric reference baseline
+visualize.py          Loss curves, anomaly distributions, ROC/PR plots
 ```
 
-### 2. Install Dependencies
-Make sure all required packages are installed:
+## Setup
+
 ```bash
+conda activate gnn_anomaly
 pip install -r requirements.txt
+
+# Optional: compile the OpenMP C extension (requires gcc with -fopenmp)
+python kernels/build_ext.py
 ```
 
-### 3. Run the Pipeline
-The graph generation is now decoupled from model training. First, generate the synthetic graph data:
+## Quick Start
+
 ```bash
+# Generate synthetic graph
 python generate_data.py --output data/graph.pt
+
+# Sequential (Phase 1 baseline)
+python train.py
+
+# CUDA-mode parallel kernel (Kernel 1 for smoothness loss)
+python train.py --parallel_mode cuda --decoder_type mlp
+
+# OpenMP CPU parallel (4 threads)
+python train.py --parallel_mode openmp --n_threads 4
+
+# Full pipeline with visualization + baselines
+python run_all.py --parallel_mode cuda --decoder_type mlp
+
+# Kernel timing benchmark
+python benchmark.py --n_threads 4
 ```
 
-Then, to run the complete pipeline (GAE -> GAT -> Plotting -> Metric evaluation):
-```bash
-python run_all.py --graph_path data/graph.pt
-```
+## Parallel Modes
 
-## Using Your Own Dataset
+| Flag | Kernel | Description |
+|---|---|---|
+| `--parallel_mode sequential` | Dense N x N ops | Default baseline |
+| `--parallel_mode cuda` | Sparse thread-per-edge | GPU when available, CPU fallback |
+| `--parallel_mode openmp` | Sparse thread-per-edge | C extension with OpenMP, n_threads configurable |
 
-If you want to train the model manually on a custom dataset rather than the synthetic graph, you need to save your own `HeteroGraph` object as a `.pt` file and pass it to the training scripts.
+The three target kernels from the paper:
+- Kernel 1: Smoothness loss `L_unsup = sum_{(i,j) in E} ||s_i - s_j||^2` — used in GAT training
+- Kernel 2: Per-edge attention scores `e_ij = LeakyReLU(a^T [Wh_i || Wh_j])` — benchmarked
+- Kernel 3: Neighbor aggregation `h_v = sum_{u in N(v)} coeff * W * h_u` — benchmarked
 
-### Steps to Integrate Custom Data:
+## Decoder Types
 
-1. **Format Your Features:** Prepare your node features as float tensors. You will need separate matrices for each node type (e.g., `x_product`, `x_user`, `x_seller`).
-2. **Format Your Edges:** Prepare your connections as edge index tensors (shape `[2, num_edges]`, dtype `torch.long`). For example, a purchase edge index between products and users.
-3. **Format Labels & Splits:** Create integer tensors for labels (`0` for normal, `1` for anomalous) and boolean masks representing your Train, Validation, and Test splits.
-4. **Build the HeteroGraph Object:** Construct the graph structure using the provided dataclass in `data/graph_builder.py`.
-   
-   ```python
-   from data.graph_builder import HeteroGraph
-   import torch
+| Flag | Description |
+|---|---|
+| `--decoder_type inner_product` | Symmetric `Z Z^T` (default, Phase 1) |
+| `--decoder_type mlp` | Asymmetric 2-layer MLP on directed edge pairs |
 
-   # 1. Define bounds and counts
-   node_counts = {'product': N_P, 'user': N_U, 'seller': N_S}
-   bounds = {
-       'product': (0, N_P),
-       'user': (N_P, N_P + N_U),
-       'seller': (N_P + N_U, N_P + N_U + N_S)
-   }
+## Key Arguments (`train.py` / `run_all.py`)
 
-   # 2. Package dictionaries
-   x_dict = {
-       'product': torch.tensor(x_product, dtype=torch.float),
-       'user': torch.tensor(x_user, dtype=torch.float),
-       'seller': torch.tensor(x_seller, dtype=torch.float),
-   }
-   
-   edge_index_dict = {
-       ('product', 'purchase', 'user'): torch.tensor(edge_purchase, dtype=torch.long),
-       # Add other relations...
-   }
-
-   # 3. Instantiate and save
-   custom_graph = HeteroGraph(
-       x_dict=x_dict,
-       edge_index_dict=edge_index_dict,
-       y=torch.tensor(labels, dtype=torch.long),
-       node_type_bounds=bounds,
-       num_nodes_per_type=node_counts,
-       labeled_mask=torch.tensor(train_mask, dtype=torch.bool),
-       val_mask=torch.tensor(val_mask, dtype=torch.bool),
-       test_mask=torch.tensor(test_mask, dtype=torch.bool)
-   )
-   
-   # Save the graph
-   torch.save(custom_graph, "data/my_custom_graph.pt")
-   ```
-5. **Feed it to the pipeline:** You can then pass this saved file to the training pipeline using the `--graph_path` argument:
-   ```bash
-   python train.py --graph_path data/my_custom_graph.pt
-   ```
-
-## Command-Line Arguments
-
-The pipeline is highly customizable. You can modify the architecture and training parameters using the following CLI arguments:
-
-### Graph Generation (`generate_data.py`)
-- `--n_products` (default: 200): Number of product nodes to generate.
-- `--n_users` (default: 80): Number of user nodes to generate.
-- `--n_sellers` (default: 20): Number of seller nodes to generate.
-- `--anomaly_fraction` (default: 0.15): Ratio of anomalous nodes.
-- `--seed` (default: 42): Random seed for reproducibility.
-- `--output` (default: `data/graph.pt`): Where to save the generated graph.
-
-### Training & Evaluation (`run_all.py` / `train.py`)
-- `--graph_path` (default: `data/graph.pt`): Path to the generated graph file.
-- `--gae_epochs` (default: 200): Total epochs for Stage 1 Unsupervised Training.
-- `--gat_epochs` (default: 100): Total epochs for Stage 2 Semi-Supervised Training.
-- `--embed_dim` (default: 128): Size of the node embeddings from the Stage 1 GAE.
-- `--hidden_dim` (default: 64): Internal hidden dimension size for the Stage 2 GAT.
-- `--lr` (default: 1e-3): Learning rate for both models.
-- `--lam` (default: 0.5): Lambda hyperparameter controlling the balance between the supervised loss and the unsupervised smoothness penalty.
-- `--results_dir` (default: `results`): Directory to save plots.
-- `--skip_baselines`: Add this flag to run_all.py to skip executing the PyTorch Geometric reference baseline.
+- `--decoder_type {inner_product,mlp}` — GAE decoder (default: inner_product)
+- `--parallel_mode {sequential,openmp,cuda}` — Kernel execution mode (default: sequential)
+- `--n_threads N` — OpenMP thread count (default: 4)
+- `--gae_epochs N` — Stage 1 epochs (default: 200)
+- `--gat_epochs N` — Stage 2 epochs (default: 100)
+- `--embed_dim N` — Node embedding size (default: 128)
+- `--hidden_dim N` — Hidden layer size (default: 64)
+- `--graph_path PATH` — Path to graph file (default: data/graph.pt)
+- `--results_dir PATH` — Output directory (default: results/)

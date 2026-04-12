@@ -3,19 +3,21 @@ gae.py  —  Stage 1: Graph AutoEncoder (Unsupervised Representation Learning)
 
 Architecture (paper Section IV-C):
   Encoder: 2-layer GCN with type-specific weight matrices (Eq. 7)
-  Decoder: Inner-product decoder  Â = σ(Z Zᵀ)  (Eq. 8)
-  Loss:    Binary cross-entropy over all node pairs (Eq. 9)
+  Decoder: Inner-product  Â = σ(Z Zᵀ)  (Eq. 8)  or asymmetric MLP (Section 2.6)
+  Loss:    Binary cross-entropy over all node pairs / sampled edge pairs (Eq. 9)
 
 Key equations:
   h_v^(l) = σ( Σ_r Σ_{u ∈ N_r(v)} [ 1/√(|N(v)||N(u)|) * W_r^(l) * h_u^(l-1) ] + b^(l) )
-  Â       = σ( Z Zᵀ )
+  Â       = σ( Z Zᵀ )                          — inner-product decoder
+  Â_ij    = σ( MLP([z_i || z_j]) )             — asymmetric MLP decoder
   L_GAE   = -Σ_{i,j} [ A_ij log(Â_ij) + (1-A_ij) log(1-Â_ij) ]
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+from models.mlp_decoder import MLPDecoder
 
 
 class TypeSpecificGCNLayer(nn.Module):
@@ -122,17 +124,32 @@ class GraphAutoEncoder(nn.Module):
     """
     Full GAE = Encoder + Decoder.
 
+    Supports two decoder types:
+      'inner_product' (default) — symmetric Â = σ(Z Zᵀ), computes over all N^2 pairs.
+      'mlp'                     — asymmetric MLP on sampled directed edge pairs,
+                                  suitable for directed heterogeneous graphs.
+
     Usage:
-        gae = GraphAutoEncoder(feat_dim=19, hidden_dim=64, embed_dim=128, edge_types=[...])
-        Z      = gae.encode(H, A_norm_per_type)
-        A_hat  = gae.decode(Z)
-        loss   = gae.reconstruction_loss(A, A_hat)
+        gae = GraphAutoEncoder(feat_dim=19, hidden_dim=64, embed_dim=128,
+                               edge_types=[...], decoder_type='mlp')
+        Z, loss = gae.compute_reconstruction_loss(H, A, A_norm_per_type)
     """
 
-    def __init__(self, feat_dim: int, hidden_dim: int, embed_dim: int, edge_types: list):
+    def __init__(
+        self,
+        feat_dim: int,
+        hidden_dim: int,
+        embed_dim: int,
+        edge_types: list,
+        decoder_type: str = 'inner_product',   # 'inner_product' | 'mlp'
+    ):
         super().__init__()
-        self.encoder = GAEEncoder(feat_dim, hidden_dim, embed_dim, edge_types)
-        self.decoder = GAEDecoder()
+        self.decoder_type = decoder_type
+        self.encoder      = GAEEncoder(feat_dim, hidden_dim, embed_dim, edge_types)
+        if decoder_type == 'mlp':
+            self.decoder = MLPDecoder(embed_dim, hidden_dim)
+        else:
+            self.decoder = GAEDecoder()
 
     def encode(
         self,
@@ -153,6 +170,29 @@ class GraphAutoEncoder(nn.Module):
         Z            = self.encode(H, A_norm_per_type)
         A_hat_logits = self.decode(Z)
         return Z, A_hat_logits
+
+    def compute_reconstruction_loss(
+        self,
+        H: torch.Tensor,
+        A: torch.Tensor,
+        A_norm_per_type: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Unified encode -> decode -> loss step for both decoder types.
+
+        Returns:
+            Z    — frozen embeddings [N, embed_dim]
+            loss — reconstruction loss scalar
+        """
+        Z = self.encode(H, A_norm_per_type)
+        if self.decoder_type == 'mlp':
+            edge_index, labels = MLPDecoder.sample_edges(A)
+            logits = self.decoder(Z, edge_index)
+            loss   = MLPDecoder.reconstruction_loss(logits, labels)
+        else:
+            A_hat_logits = self.decode(Z)
+            loss = GraphAutoEncoder.reconstruction_loss(A, A_hat_logits)
+        return Z, loss
 
     @staticmethod
     def reconstruction_loss(A: torch.Tensor, A_hat_logits: torch.Tensor) -> torch.Tensor:

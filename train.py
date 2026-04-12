@@ -32,6 +32,7 @@ from utils.utils import (
     set_seed,
     build_per_type_adj_matrices,
     build_homogeneous_features,
+    build_edge_indices,
     compute_metrics,
     move_adj_dict_to_device,
 )
@@ -63,13 +64,16 @@ def train_gae(
     Trains GAE to minimize reconstruction loss (Eq. 9).
     Labels are NOT used — purely unsupervised.
 
-    Returns list of loss values per epoch.
+    Uses gae.compute_reconstruction_loss() which handles both
+    inner_product and mlp decoder types internally.
+
+    Returns list of loss values per epoch and elapsed training time.
     """
     optimizer = optim.Adam(gae.parameters(), lr=lr)
     losses = []
 
     print(f"\n{'='*60}")
-    print("  STAGE 1: GAE Unsupervised Training")
+    print(f"  STAGE 1: GAE Unsupervised Training  [{gae.decoder_type} decoder]")
     print(f"{'='*60}")
 
     start_time = time.time()
@@ -77,8 +81,7 @@ def train_gae(
     for epoch in range(1, n_epochs + 1):
         optimizer.zero_grad()
 
-        Z, A_hat_logits = gae(H, A_norm_per_type)
-        loss = gae.reconstruction_loss(A, A_hat_logits)
+        Z, loss = gae.compute_reconstruction_loss(H, A, A_norm_per_type)
 
         loss.backward()
         optimizer.step()
@@ -108,18 +111,39 @@ def train_gat(
     lr: float = 1e-3,
     lam: float = 0.5,
     log_every: int = 10,
+    parallel_mode: str = 'sequential',   # 'sequential' | 'openmp' | 'cuda'
+    edge_index: torch.Tensor = None,     # [2, E]  required for openmp / cuda
+    n_threads: int = 4,
 ) -> list:
     """
     Trains GAT on the frozen embeddings Z_init from Stage 1.
-    Uses L_GAT = L_sup + λ * L_unsup  (Eq. 15).
+    Uses L_GAT = L_sup + lambda * L_unsup  (Eq. 15).
+
+    When parallel_mode != 'sequential', the smoothness loss (Kernel 1)
+    is computed via the sparse edge-indexed kernel instead of the dense
+    N x N matrix, matching the thread-per-edge CUDA / OpenMP design.
 
     Returns list of (total_loss, sup_loss, unsup_loss) per epoch.
     """
+    # Select the smoothness loss kernel based on parallel mode
+    if parallel_mode == 'openmp' and edge_index is not None:
+        from kernels.openmp_ops import smoothness_loss_openmp as _smoothness_fn
+        _use_kernel = True
+        print(f"  [Parallel] Smoothness loss: OpenMP kernel ({n_threads} threads)")
+    elif parallel_mode == 'cuda' and edge_index is not None:
+        from kernels.cuda_ops import smoothness_loss_parallel as _smoothness_fn
+        _use_kernel = True
+        print(f"  [Parallel] Smoothness loss: CUDA-mode sparse kernel")
+    else:
+        _use_kernel = False
+        if parallel_mode != 'sequential':
+            print(f"  [Parallel] edge_index not provided; falling back to sequential")
+
     optimizer = optim.Adam(gat.parameters(), lr=lr)
     history = []
 
     print(f"\n{'='*60}")
-    print("  STAGE 2: GAT Semi-supervised Training")
+    print(f"  STAGE 2: GAT Semi-supervised Training  [mode: {parallel_mode}]")
     print(f"{'='*60}")
 
     start_time = time.time()
@@ -129,9 +153,18 @@ def train_gat(
 
         s = gat(Z_init, A_per_type)         # [N] anomaly scores
 
-        total_loss, l_sup, l_unsup = GraphAttentionNetwork.combined_loss(
-            s=s, y=y, labeled_mask=labeled_mask, A=A, lam=lam
-        )
+        if _use_kernel:
+            # Kernel 1: sparse thread-per-edge smoothness loss
+            l_sup   = GraphAttentionNetwork.supervised_loss(s, y, labeled_mask)
+            if parallel_mode == 'openmp':
+                l_unsup = _smoothness_fn(s, edge_index, n_threads=n_threads)
+            else:
+                l_unsup = _smoothness_fn(s, edge_index)
+            total_loss = l_sup + lam * l_unsup
+        else:
+            total_loss, l_sup, l_unsup = GraphAttentionNetwork.combined_loss(
+                s=s, y=y, labeled_mask=labeled_mask, A=A, lam=lam
+            )
 
         total_loss.backward()
         optimizer.step()
@@ -201,7 +234,7 @@ def run_training(args):
     if not graph_path.exists():
         raise FileNotFoundError(f"Graph file not found: {args.graph_path}. Please run generate_data.py first.")
     
-    graph = torch.load(graph_path)
+    graph = torch.load(graph_path, weights_only=False)
 
     # Feature matrix H^(0): [N, feat_dim]
     H = build_homogeneous_features(graph, device)
@@ -223,6 +256,13 @@ def run_training(args):
     feat_dim  = H.shape[1]
     N         = H.shape[0]
 
+    # ── EDGE INDEX (needed for parallel kernels) ──────────────────────────────
+    edge_index_sparse = None
+    if args.parallel_mode != 'sequential':
+        _, edge_index_sparse = build_edge_indices(graph)
+        edge_index_sparse = edge_index_sparse.to(device)
+        print(f"[Parallel] Built edge_index: {edge_index_sparse.shape[1]} edges, "
+              f"mode={args.parallel_mode}")
     print(f"\n[Config] N={N}, feat_dim={feat_dim}, embed_dim={args.embed_dim}, "
           f"hidden_dim={args.hidden_dim}")
     print(f"[Config] GAE epochs={args.gae_epochs}, GAT epochs={args.gat_epochs}, "
@@ -230,10 +270,11 @@ def run_training(args):
 
     # ── STAGE 1: GAE ──────────────────────────────────────────────────────────
     gae = GraphAutoEncoder(
-        feat_dim   = feat_dim,
-        hidden_dim = args.hidden_dim,
-        embed_dim  = args.embed_dim,
-        edge_types = EDGE_TYPES,
+        feat_dim     = feat_dim,
+        hidden_dim   = args.hidden_dim,
+        embed_dim    = args.embed_dim,
+        edge_types   = EDGE_TYPES,
+        decoder_type = args.decoder_type,
     ).to(device)
 
     gae_losses, gae_time = train_gae(
@@ -260,10 +301,12 @@ def run_training(args):
 
     gat_history, gat_time = train_gat(
         gat, Z, A, A_per_type, y, labeled_mask,
-        n_epochs  = args.gat_epochs,
-        lr        = args.lr,
-        lam       = args.lam,
-        log_every = max(1, args.gat_epochs // 10),
+        n_epochs      = args.gat_epochs,
+        lr            = args.lr,
+        lam           = args.lam,
+        log_every     = max(1, args.gat_epochs // 10),
+        parallel_mode = args.parallel_mode,
+        edge_index    = edge_index_sparse,
     )
 
     # ── EVALUATION ────────────────────────────────────────────────────────────
@@ -304,16 +347,24 @@ def run_training(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GNN-EADD Phase 1 Training")
-    p.add_argument('--graph_path',       type=str,   default='data/graph.pt', help='Path to pre-generated graph file')
-    p.add_argument('--embed_dim',        type=int,   default=128)
-    p.add_argument('--hidden_dim',       type=int,   default=64)
-    p.add_argument('--gae_epochs',       type=int,   default=200)
-    p.add_argument('--gat_epochs',       type=int,   default=100)
-    p.add_argument('--lr',               type=float, default=1e-3)
-    p.add_argument('--lam',              type=float, default=0.5)
-    p.add_argument('--seed',             type=int,   default=42)
-    p.add_argument('--results_dir',      type=str,   default='results')
+    p = argparse.ArgumentParser(description="GNN-EADD Phase 2 Training")
+    p.add_argument('--graph_path',    type=str,   default='data/graph.pt')
+    p.add_argument('--embed_dim',     type=int,   default=128)
+    p.add_argument('--hidden_dim',    type=int,   default=64)
+    p.add_argument('--gae_epochs',    type=int,   default=200)
+    p.add_argument('--gat_epochs',    type=int,   default=100)
+    p.add_argument('--lr',            type=float, default=1e-3)
+    p.add_argument('--lam',           type=float, default=0.5)
+    p.add_argument('--seed',          type=int,   default=42)
+    p.add_argument('--results_dir',   type=str,   default='results')
+    p.add_argument('--decoder_type',  type=str,   default='inner_product',
+                   choices=['inner_product', 'mlp'],
+                   help='GAE decoder: inner_product (default) or asymmetric mlp')
+    p.add_argument('--parallel_mode', type=str,   default='sequential',
+                   choices=['sequential', 'openmp', 'cuda'],
+                   help='Kernel execution mode for smoothness loss (Kernel 1)')
+    p.add_argument('--n_threads',     type=int,   default=4,
+                   help='Number of OpenMP threads (only used with --parallel_mode openmp)')
     return p.parse_args()
 
 

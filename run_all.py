@@ -42,6 +42,11 @@ def main():
     p.add_argument('--seed',             type=int,   default=42)
     p.add_argument('--results_dir',      type=str,   default='results')
     p.add_argument('--skip_baselines',   action='store_true')
+    p.add_argument('--decoder_type',     type=str,   default='inner_product',
+                   choices=['inner_product', 'mlp'])
+    p.add_argument('--parallel_mode',    type=str,   default='sequential',
+                   choices=['sequential', 'openmp', 'cuda'])
+    p.add_argument('--n_threads',        type=int,   default=4)
     args = p.parse_args()
 
     # ── TRAIN ────────────────────────────────────────────────────────────────
@@ -78,8 +83,10 @@ def main():
 
     # ── PHASE 1 SUMMARY ──────────────────────────────────────────────────────
     print("\n" + "█"*64)
-    print("  GNN-EADD PHASE 1 — FINAL SUMMARY")
+    print("  GNN-EADD PHASE 2 — FINAL SUMMARY")
     print("█"*64)
+    print(f"  Decoder   : {args.decoder_type}")
+    print(f"  Parallel  : {args.parallel_mode}")
     print(f"\n  Graph:  {N_P} products | {N_U} users | {N_S} sellers | {N} total nodes")
     print(f"  Labels: {labels_np.sum()} anomalies ({100*labels_np.mean():.1f}% of nodes)")
     print()
