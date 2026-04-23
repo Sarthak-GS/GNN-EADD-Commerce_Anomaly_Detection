@@ -35,6 +35,13 @@ from kernels.openmp_ops import (
     neighbor_aggregation_openmp,
 )
 
+# Attempt to load the raw CUDA extension for benchmarking
+try:
+    import gnn_cuda_ext
+    HAS_RAW_CUDA = True
+except ImportError:
+    HAS_RAW_CUDA = False
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -77,10 +84,17 @@ def benchmark_k1(N: int, E_idx: torch.Tensor, n_runs: int, n_threads: int, devic
     def omp():
         return smoothness_loss_openmp(s, E_idx, n_threads=n_threads)
 
+    # Raw CUDA (Custom Kernel)
+    def raw_cuda():
+        if HAS_RAW_CUDA and device.type == 'cuda':
+            return gnn_cuda_ext.smoothness_loss(s, E_idx)
+        return torch.tensor(0.0)
+
     t_seq  = _time_fn(seq,       n_runs)
     t_cuda = _time_fn(cuda_mode, n_runs)
     t_omp  = _time_fn(omp,       n_runs)
-    return t_seq, t_omp, t_cuda
+    t_raw  = _time_fn(raw_cuda,  n_runs) if HAS_RAW_CUDA and device.type == 'cuda' else 0.0
+    return t_seq, t_omp, t_cuda, t_raw
 
 
 # ── Kernel 2: Per-edge attention scores ───────────────────────────────────────
@@ -105,10 +119,17 @@ def benchmark_k2(N: int, D: int, E_idx: torch.Tensor, n_runs: int, n_threads: in
     def omp():
         return attention_scores_openmp(Wh, E_idx, a, n_threads=n_threads)
 
+    # Raw CUDA (Custom Kernel)
+    def raw_cuda():
+        if HAS_RAW_CUDA and device.type == 'cuda':
+            return gnn_cuda_ext.attention_scores(Wh, E_idx, a, 0.2)
+        return torch.tensor(0.0)
+
     t_seq  = _time_fn(seq,       n_runs)
     t_cuda = _time_fn(cuda_mode, n_runs)
     t_omp  = _time_fn(omp,       n_runs)
-    return t_seq, t_omp, t_cuda
+    t_raw  = _time_fn(raw_cuda,  n_runs) if HAS_RAW_CUDA and device.type == 'cuda' else 0.0
+    return t_seq, t_omp, t_cuda, t_raw
 
 
 # ── Kernel 3: Neighbor aggregation ────────────────────────────────────────────
@@ -134,10 +155,18 @@ def benchmark_k3(N: int, in_dim: int, out_dim: int, E_idx: torch.Tensor,
     def omp():
         return neighbor_aggregation_openmp(H, E_idx, W, n_threads=n_threads)
 
+    # Raw CUDA (Custom Kernel)
+    def raw_cuda():
+        if HAS_RAW_CUDA and device.type == 'cuda':
+            msgs = W(H[E_idx[0]])
+            return gnn_cuda_ext.neighbor_agg(msgs, E_idx[1], N)
+        return torch.tensor(0.0)
+
     t_seq  = _time_fn(seq,       n_runs)
     t_cuda = _time_fn(cuda_mode, n_runs)
     t_omp  = _time_fn(omp,       n_runs)
-    return t_seq, t_omp, t_cuda
+    t_raw  = _time_fn(raw_cuda,  n_runs) if HAS_RAW_CUDA and device.type == 'cuda' else 0.0
+    return t_seq, t_omp, t_cuda, t_raw
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -160,41 +189,46 @@ def run_benchmark(args):
     rows = []
 
     # Kernel 1
-    t_seq, t_omp, t_cuda = benchmark_k1(args.n, E_idx, args.runs, args.n_threads, device)
-    rows.append(("K1  Smoothness Loss",  t_seq, t_omp, t_cuda))
+    t_seq, t_omp, t_cuda, t_raw = benchmark_k1(args.n, E_idx, args.runs, args.n_threads, device)
+    rows.append(("K1  Smoothness Loss",  t_seq, t_omp, t_cuda, t_raw))
 
     # Kernel 2
-    t_seq, t_omp, t_cuda = benchmark_k2(args.n, D, E_idx, args.runs, args.n_threads, device)
-    rows.append(("K2  Attention Scores", t_seq, t_omp, t_cuda))
+    t_seq, t_omp, t_cuda, t_raw = benchmark_k2(args.n, D, E_idx, args.runs, args.n_threads, device)
+    rows.append(("K2  Attention Scores", t_seq, t_omp, t_cuda, t_raw))
 
     # Kernel 3
-    t_seq, t_omp, t_cuda = benchmark_k3(args.n, D, D, E_idx, args.runs, args.n_threads, device)
-    rows.append(("K3  Neighbor Agg.",    t_seq, t_omp, t_cuda))
+    t_seq, t_omp, t_cuda, t_raw = benchmark_k3(args.n, D, D, E_idx, args.runs, args.n_threads, device)
+    rows.append(("K3  Neighbor Agg.",    t_seq, t_omp, t_cuda, t_raw))
 
     # ── Print table ────────────────────────────────────────────────────────────
     W_name = 25
     col_w  = 16
     hdr    = (f"  {'Kernel':<{W_name}}  "
-              f"{'Sequential (ms)':>{col_w}}  "
-              f"{'OpenMP (ms)':>{col_w}}  "
-              f"{'CUDA-mode (ms)':>{col_w}}  "
-              f"{'Speedup OMP':>{col_w}}  "
-              f"{'Speedup CUDA':>{col_w}}")
-    sep    = "  " + "-" * (W_name + 5 * (col_w + 2))
+              f"{'Seq (ms)':>{col_w-4}}  "
+              f"{'OMP (ms)':>{col_w-4}}  "
+              f"{'PyTorch (ms)':>{col_w-2}}  "
+              f"{'Raw CUDA (ms)':>{col_w-2}}  "
+              f"{'Speedup':>{col_w-4}}")
+    sep    = "  " + "-" * (W_name + 5 * (col_w + 0))
     print(hdr)
     print(sep)
-    for name, t_seq, t_omp, t_cuda in rows:
-        sp_omp  = t_seq / max(t_omp,  1e-9)
-        sp_cuda = t_seq / max(t_cuda, 1e-9)
+    for name, t_seq, t_omp, t_pyg, t_raw in rows:
+        # Show best speedup vs sequential
+        best_t = min(t_omp, t_pyg)
+        if HAS_RAW_CUDA and t_raw > 0:
+            best_t = min(best_t, t_raw)
+        
+        speedup = t_seq / max(best_t, 1e-9)
+        
         print(f"  {name:<{W_name}}  "
-              f"{t_seq:>{col_w}.3f}  "
-              f"{t_omp:>{col_w}.3f}  "
-              f"{t_cuda:>{col_w}.3f}  "
-              f"{sp_omp:>{col_w}.2f}x  "
-              f"{sp_cuda:>{col_w}.2f}x")
+              f"{t_seq:>{col_w-4}.3f}  "
+              f"{t_omp:>{col_w-4}.3f}  "
+              f"{t_pyg:>{col_w-2}.3f}  "
+              f"{t_raw:>{col_w-2}.3f}  "
+              f"{speedup:>{col_w-4}.2f}x")
     print(sep)
-    print(f"\n  Note: Speedup > 1 = faster than sequential. "
-          f"Sequential uses dense N x N ops; parallel modes use edge-indexed ops.\n")
+    print(f"\n  Note: Speedup is relative to sequential baseline. "
+          f"Raw CUDA is available: {HAS_RAW_CUDA}\n")
 
 
 def parse_args():

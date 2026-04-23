@@ -18,6 +18,14 @@ all edges computed concurrently — no sequential loop over N x N pairs.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
+
+# Attempt to load the raw CUDA extension
+try:
+    import gnn_cuda_ext
+    _HAS_CUDA_EXT = True
+except ImportError:
+    _HAS_CUDA_EXT = False
 
 
 def smoothness_loss_parallel(
@@ -39,6 +47,9 @@ def smoothness_loss_parallel(
             out[tid] = diff * diff
         then reduce out[] to scalar
     """
+    if _HAS_CUDA_EXT and s.is_cuda:
+        return gnn_cuda_ext.smoothness_loss(s, edge_index)
+
     src, dst = edge_index[0], edge_index[1]   # [E] each
     diff = s[src] - s[dst]                    # [E]  — one element per edge
     return (diff ** 2).mean()
@@ -62,6 +73,9 @@ def attention_scores_parallel(
             pair = concat( Wh[src[tid]], Wh[dst[tid]] )  // 2*out_dim values
             e[tid] = LeakyReLU( dot(a, pair) )
     """
+    if _HAS_CUDA_EXT and Wh.is_cuda:
+        return gnn_cuda_ext.attention_scores(Wh, edge_index, a, leaky_slope)
+
     src, dst = edge_index[0], edge_index[1]
     Wh_src = Wh[src]                              # [E, out_dim]
     Wh_dst = Wh[dst]                              # [E, out_dim]
@@ -93,6 +107,13 @@ def neighbor_aggregation_parallel(
             atomicAdd( &out[dst[tid]], msg )      // safe concurrent write
     """
     N = H.shape[0]
+    if _HAS_CUDA_EXT and H.is_cuda:
+        # Pre-transform messages
+        msgs = W(H[edge_index[0]])
+        if norm_coeff is not None:
+            msgs = msgs * norm_coeff.view(-1, 1)
+        return gnn_cuda_ext.neighbor_agg(msgs, edge_index[1], N)
+
     src, dst = edge_index[0], edge_index[1]  # [E] each
 
     # Apply weight transform on source features — [E, out_dim]

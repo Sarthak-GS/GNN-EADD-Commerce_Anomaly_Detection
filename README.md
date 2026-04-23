@@ -2,6 +2,15 @@
 
 Detects anomalous behaviour in e-commerce platforms using a dual-stage heterogeneous Graph Neural Network. Phase 2 adds GPU-parallel CUDA kernels, an OpenMP CPU baseline, an asymmetric MLP decoder, and a full timing benchmark.
 
+---
+### 🚀 Premium Orchestration
+We now provide a **Makefile** for streamlined execution:
+- `make compile`  : Build OpenMP and Raw CUDA extensions
+- `make generate` : Build synthetic graph
+- `make train`    : Run full pipeline (GAE + GAT + Evaluation)
+- `make benchmark`: Compare performance across all modes
+---
+
 ## Overview
 
 1. Stage 1 (Unsupervised): Graph Auto-Encoder (GAE) learns node embeddings from graph structure. Supports symmetric inner-product decoder or asymmetric MLP decoder.
@@ -16,7 +25,10 @@ models/
   mlp_decoder.py      Asymmetric MLP decoder for directed edges
 
 kernels/
-  cuda_ops.py         3 thread-per-edge GPU-compatible kernels
+  cuda_kernels.cu     Raw CUDA kernels (K1, K2, K3)
+  cuda_extension.cpp  C++/Pybind11 glue code for CUDA
+  setup_cuda.py       Compilation script for CUDA extension
+  cuda_ops.py         Python bridge for CUDA kernels (with PyTorch fallback)
   openmp_ops.py       OpenMP CPU wrappers (with PyTorch fallback)
   openmp_kernels.c    C source compiled to openmp_ext.so
   build_ext.py        Compile script for OpenMP extension
@@ -25,40 +37,35 @@ data/graph_builder.py Synthetic heterogeneous graph construction
 train.py              Dual-stage training loop (all modes)
 run_all.py            Full pipeline orchestrator
 benchmark.py          Kernel timing comparison table
-baseline_comparison.py PyTorch Geometric reference baseline
-visualize.py          Loss curves, anomaly distributions, ROC/PR plots
+Makefile              Orchestration script
 ```
 
-## Setup
+## Setup & Compilation
 
 ```bash
 conda activate gnn_anomaly
 pip install -r requirements.txt
 
-# Optional: compile the OpenMP C extension (requires gcc with -fopenmp)
+# 1. Compile OpenMP Extension
 python kernels/build_ext.py
+
+# 2. Compile Raw CUDA Extension (Optional)
+# Requires matching CUDA Toolkit (e.g. CUDA 13.0 for PyTorch 2.11)
+python kernels/setup_cuda.py install --user
 ```
+
+> [!NOTE]
+> If CUDA compilation fails due to version mismatch, the pipeline automatically falls back to **optimized PyTorch sparse operations**, ensuring you still get GPU acceleration wherever possible.
 
 ## Quick Start
 
 ```bash
-# Generate synthetic graph
-python generate_data.py --output data/graph.pt
+# Full Stage 1 + Stage 2 pipeline
+make generate
+make train
 
-# Sequential (Phase 1 baseline)
-python train.py
-
-# CUDA-mode parallel kernel (Kernel 1 for smoothness loss)
-python train.py --parallel_mode cuda --decoder_type mlp
-
-# OpenMP CPU parallel (4 threads)
-python train.py --parallel_mode openmp --n_threads 4
-
-# Full pipeline with visualization + baselines
-python run_all.py --parallel_mode cuda --decoder_type mlp
-
-# Kernel timing benchmark
-python benchmark.py --n_threads 4
+# Performance comparison
+make benchmark
 ```
 
 ## Parallel Modes
@@ -66,8 +73,8 @@ python benchmark.py --n_threads 4
 | Flag | Kernel | Description |
 |---|---|---|
 | `--parallel_mode sequential` | Dense N x N ops | Default baseline |
-| `--parallel_mode cuda` | Sparse thread-per-edge | GPU when available, CPU fallback |
-| `--parallel_mode openmp` | Sparse thread-per-edge | C extension with OpenMP, n_threads configurable |
+| `--parallel_mode cuda` | Raw CUDA / Sparse | Custom CUDA kernels (if compiled) or Sparse fallback |
+| `--parallel_mode openmp` | Sparse thread-per-edge | C extension with OpenMP |
 
 The three target kernels from the paper:
 - Kernel 1: Smoothness loss `L_unsup = sum_{(i,j) in E} ||s_i - s_j||^2` — used in GAT training
