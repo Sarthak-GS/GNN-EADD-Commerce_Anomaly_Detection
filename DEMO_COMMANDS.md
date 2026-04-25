@@ -1,45 +1,52 @@
-# GNN-EADD Phase 2: Demo Commands & Execution Guide
+# GNN-EADD Phase 2: Live Demo & Execution Guide
 
-## Quick Reference — Copy-Paste Commands
+## 👨‍🏫 LIVE PRESENTATION GUIDE (LARGE GRAPH)
+Because training on a large graph takes time, you should train the model *before* the presentation. During the live demo, you will only show the **Inference Speed Comparison** and the **Performance Benchmarks**.
 
-### Step 0: Activate Environment
+### PHASE A: Prep Work (Do this before the presentation)
 ```bash
+# 1. Activate Environment
 conda activate sarthak_env
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH
 cd ~/Desktop/POP/project/gnn_eadd
-```
 
-### Step 1: Build Custom CUDA Kernels (one-time)
-```bash
+# 2. Build Kernels (if not done already)
 pip install -e . --no-build-isolation
-```
 
-### Step 2: Generate Synthetic Graph (small, for RTX 2050)
-```bash
-python generate_data.py --n_products 500 --n_users 200 --n_sellers 50
-```
+# 3. Generate a LARGE Graph (e.g., 5000 products, 2000 users, 500 sellers)
+# This creates data/graph.pt with 7,500 total nodes and many edges.
+python generate_data.py --n_products 5000 --n_users 2000 --n_sellers 500
 
-### Step 3: Run Everything (Training + Benchmarks + Baselines + Plots)
-```bash
-python run_phase2.py
-```
-
-### Step 3 (Alternative): Run Individual Steps
-```bash
-# Just run benchmarks (no training):
-python run_phase2.py --skip_training --skip_baselines
-
-# Just train + evaluate:
+# 4. Train the Model (This takes time, let it finish)
+# We skip benchmarks here, just getting the weights saved to results/checkpoint.pt
 python run_phase2.py --skip_benchmark --skip_baselines
+```
 
-# Just benchmark:
+### PHASE B: The Live Demo (Do this in front of the Professor)
+When the professor asks to see it work, do NOT run training again. Run these exact commands to show off the speed:
+
+```bash
+# 1. Show the Raw Kernel Benchmarks (The 2900x CPU Speedup)
+# This tests the C++ kernels against pure math on 1k, 10k, and 50k nodes.
 python benchmark.py --results_dir results
 
-# Just OpenMP smoke test:
-python openmp_baseline.py
+# 2. Show the PyTorch vs CUDA Inference Comparison (The 46x GPU Speedup)
+# This loads your saved large graph and runs inference TWICE (PyTorch vs CUDA)
+# It will prove identical accuracy but massive speedups.
+# Add --skip_training so it only does the inference phase using the saved weights!
+python run_phase2.py --skip_training --skip_benchmark --skip_baselines
+```
 
-# Just kernel correctness tests:
-python -c "from run_phase2 import test_kernel_correctness; test_kernel_correctness()"
+---
+
+## Alternative / Utility Commands
+
+```bash
+# Run absolutely everything (Slowest)
+python run_phase2.py
+
+# Just OpenMP CPU smoke test:
+python openmp_baseline.py
 
 # Just PyG baseline comparison:
 python baseline_comparison.py

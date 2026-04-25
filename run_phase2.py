@@ -145,31 +145,160 @@ def main():
         )
         run_benchmark(bench_args)
 
-    # Step 4: Train model
+    # Step 4: Train model OR load saved model
     if not args.skip_training:
         print("\n" + "="*60)
         print("  MODEL TRAINING")
         print("="*60)
-        gae, gat, Z, A_per_type, graph, metrics = run_training_with_cuda(args)
+        gae, gat, Z, A_per_type, graph, metrics, H, A_norm_per_type = run_training_with_cuda(args)
+        ckpt = torch.load(Path(args.results_dir) / 'checkpoint.pt', map_location='cpu', weights_only=False)
+    else:
+        print("\n" + "="*60)
+        print("  LOADING SAVED MODEL FOR INFERENCE")
+        print("="*60)
+        ckpt_path = Path(args.results_dir) / 'checkpoint.pt'
+        if not ckpt_path.exists():
+            print("[✗] Error: checkpoint.pt not found! You must train at least once before skipping.")
+            sys.exit(1)
+        
+        graph = torch.load(args.graph_path, weights_only=False)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # We need to recreate the same variables that train.py generates
+        from train import (build_homogeneous_features, build_per_type_adj_matrices, 
+                           EDGE_TYPES, GraphAutoEncoder, GraphAttentionNetwork, move_adj_dict_to_device)
+        
+        H = build_homogeneous_features(graph, device)
+        A_norm_per_type = move_adj_dict_to_device(build_per_type_adj_matrices(graph, normalized=True), device)
+        A_per_type = move_adj_dict_to_device(build_per_type_adj_matrices(graph, normalized=False), device)
+        
+        gae = GraphAutoEncoder(H.shape[1], args.hidden_dim, args.embed_dim, EDGE_TYPES).to(device)
+        gat = GraphAttentionNetwork(args.embed_dim, args.hidden_dim, EDGE_TYPES).to(device)
+        
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        gae.load_state_dict(ckpt['gae_state'])
+        gat.load_state_dict(ckpt['gat_state'])
+        Z = ckpt['Z'].to(device)
+        print("[✓] Loaded trained weights and graph successfully.")
 
-        # Step 5: Visualization
-        from visualize import make_all_plots
-        ckpt = torch.load(Path(args.results_dir) / 'checkpoint.pt',
-                         map_location='cpu', weights_only=False)
-        N_P = graph.num_nodes_per_type['product']
-        N_U = graph.num_nodes_per_type['user']
-        N_S = graph.num_nodes_per_type['seller']
-        node_types_np = np.array([0]*N_P + [1]*N_U + [2]*N_S)
+    # Step 5: Visualization
+    from visualize import make_all_plots
+    N_P = graph.num_nodes_per_type['product']
+    N_U = graph.num_nodes_per_type['user']
+    N_S = graph.num_nodes_per_type['seller']
+    node_types_np = np.array([0]*N_P + [1]*N_U + [2]*N_S)
+
+    gat.eval()
+    with torch.no_grad():
+        scores_np = gat(Z, A_per_type).cpu().numpy()
+    labels_np = graph.y.numpy()
+
+    make_all_plots(
+        ckpt['gae_losses'], ckpt['gat_history'],
+        scores_np, labels_np, node_types_np, graph
+    )
+
+    # ══════════════════════════════════════════════════════════════
+    # Step 5b: INFERENCE SPEED COMPARISON — CUDA Kernels vs PyTorch
+    # ══════════════════════════════════════════════════════════════
+    # This is the KEY Phase 2 demonstration:
+    #   → Train once using PyTorch (with autograd for backward pass)
+    #   → Run inference TWICE: once with native PyTorch, once with
+    #     our custom CUDA kernels
+    #   → Prove: SAME accuracy, DIFFERENT speed
+    if has_cuda:
+        print("\n" + "="*60)
+        print("  INFERENCE COMPARISON: CUDA Kernels vs PyTorch-Only")
+        print("="*60)
+
+        from utils.utils import compute_metrics
 
         gat.eval()
-        with torch.no_grad():
-            scores_np = gat(Z, A_per_type).cpu().numpy()
-        labels_np = graph.y.numpy()
+        gae.eval()
+        n_runs = 100
 
-        make_all_plots(
-            ckpt['gae_losses'], ckpt['gat_history'],
-            scores_np, labels_np, node_types_np, graph
-        )
+        # ── Monkey-patch to disable CUDA kernels ──────────────────
+        # Our guard in gat.py / gae.py is:
+        #   if H.is_cuda and not torch.is_grad_enabled():
+        # By patching torch.is_grad_enabled → True, the guard fails
+        # and we get the pure PyTorch dense fallback path.
+        _original_grad_fn = torch.is_grad_enabled
+
+        # ── GAT INFERENCE (Stage 2) ───────────────────────────────
+        # Run 1: PyTorch-only (force dense fallback)
+        try:
+            torch.is_grad_enabled = lambda: True  # trick: blocks kernel path
+            with torch.no_grad():
+                _ = gat(Z, A_per_type)  # warm-up
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(n_runs):
+                with torch.no_grad():
+                    scores_pytorch = gat(Z, A_per_type)
+            torch.cuda.synchronize()
+            t_gat_pytorch = (time.perf_counter() - t0) / n_runs
+        finally:
+            torch.is_grad_enabled = _original_grad_fn
+
+        # Run 2: Custom CUDA kernels
+        with torch.no_grad():
+            _ = gat(Z, A_per_type)  # warm-up
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            with torch.no_grad():
+                scores_cuda = gat(Z, A_per_type)
+        torch.cuda.synchronize()
+        t_gat_cuda = (time.perf_counter() - t0) / n_runs
+
+        # ── GAE ENCODE INFERENCE (Stage 1) ────────────────────────
+        try:
+            torch.is_grad_enabled = lambda: True
+            with torch.no_grad():
+                _ = gae.encode(H, A_norm_per_type)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(n_runs):
+                with torch.no_grad():
+                    _ = gae.encode(H, A_norm_per_type)
+            torch.cuda.synchronize()
+            t_gae_pytorch = (time.perf_counter() - t0) / n_runs
+        finally:
+            torch.is_grad_enabled = _original_grad_fn
+
+        with torch.no_grad():
+            _ = gae.encode(H, A_norm_per_type)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            with torch.no_grad():
+                _ = gae.encode(H, A_norm_per_type)
+        torch.cuda.synchronize()
+        t_gae_cuda = (time.perf_counter() - t0) / n_runs
+
+        # ── Verify accuracy is IDENTICAL ──────────────────────────
+        s_pt = scores_pytorch.cpu().numpy()
+        s_cu = scores_cuda.cpu().numpy()
+        max_diff = abs(s_pt - s_cu).max()
+
+        m = graph.test_mask.numpy()
+        metrics_pt = compute_metrics(s_pt[m], graph.y.numpy()[m])
+        metrics_cu = compute_metrics(s_cu[m], graph.y.numpy()[m])
+
+        gat_speedup = t_gat_pytorch / t_gat_cuda if t_gat_cuda > 0 else float('inf')
+        gae_speedup = t_gae_pytorch / t_gae_cuda if t_gae_cuda > 0 else float('inf')
+
+        print(f"\n  Averaged over {n_runs} inference passes on {scores_np.shape[0]} nodes:")
+        print(f"\n  ┌──────────────────────┬──────────────┬──────────────┬──────────┐")
+        print(f"  │ Inference Stage      │ PyTorch (ms) │ CUDA K. (ms) │ Speedup  │")
+        print(f"  ├──────────────────────┼──────────────┼──────────────┼──────────┤")
+        print(f"  │ GAE Encode (Stage 1) │ {t_gae_pytorch*1000:>11.3f} │ {t_gae_cuda*1000:>11.3f} │ {gae_speedup:>7.2f}x │")
+        print(f"  │ GAT Score  (Stage 2) │ {t_gat_pytorch*1000:>11.3f} │ {t_gat_cuda*1000:>11.3f} │ {gat_speedup:>7.2f}x │")
+        print(f"  └──────────────────────┴──────────────┴──────────────┴──────────┘")
+        print(f"\n  Accuracy Verification (held-out test set):")
+        print(f"    PyTorch-Only  AUC-ROC: {metrics_pt['auc_roc']:.4f}   F1: {metrics_pt['f1']:.4f}")
+        print(f"    CUDA Kernels  AUC-ROC: {metrics_cu['auc_roc']:.4f}   F1: {metrics_cu['f1']:.4f}")
+        print(f"    Max score difference : {max_diff:.2e}  {'✓ IDENTICAL' if max_diff < 1e-4 else '⚠ SMALL FP DIFF'}")
 
     # Step 6: PyG Baseline
     if not args.skip_baselines:

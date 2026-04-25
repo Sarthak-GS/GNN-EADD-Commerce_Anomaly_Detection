@@ -60,18 +60,59 @@ class TypeSpecificGCNLayer(nn.Module):
     ) -> torch.Tensor:
         """
         Returns H_new [N, out_dim].
+
+        [Lec 2] Phase 2: When CUDA kernels are available and data is on GPU,
+        uses custom neighbor_aggregation kernel for message passing and
+        tiled_matmul kernel for the W_r projection. Falls back to dense
+        matmul on CPU or when kernels are not compiled.
         """
         # We output out_dim, so init shape is (N, out_dim)
         out_dim = list(self.W.values())[0].weight.shape[0]
-        aggregated = torch.zeros(H.shape[0], out_dim, device=H.device, dtype=H.dtype)
+        N = H.shape[0]
+        aggregated = torch.zeros(N, out_dim, device=H.device, dtype=H.dtype)
+
+        # [Lec 4] GPGPU: Use custom CUDA kernels during inference (no_grad).
+        # During training, we use PyTorch ops so autograd can compute gradients.
+        _cuda_kernels = None
+        if H.is_cuda and not torch.is_grad_enabled():
+            try:
+                import gnn_cuda_kernels as _ck
+                _cuda_kernels = _ck
+            except ImportError:
+                pass
 
         for r in self.edge_types:
             A_r = A_norm_per_type.get(r)
             if A_r is None:
                 continue
-            # Message: A_norm_r [N, N] @ H [N, in_dim] → [N, in_dim]  then W_r
-            msg = A_r @ H                  # [N, in_dim]
-            aggregated = aggregated + self.W[r](msg)    # [N, out_dim]
+
+            if _cuda_kernels is not None:
+                # ═══════════ PHASE 2: CUSTOM CUDA KERNEL PATH ═══════════
+                # Extract sparse edge list from normalized adjacency
+                row, col = A_r.nonzero(as_tuple=True)
+                row_i, col_i = row.long().contiguous(), col.long().contiguous()
+                # Edge weights are the normalized adjacency values
+                alpha_sparse = A_r[row, col].contiguous()
+
+                # [Lec 9,20] Step 1: Neighbor Aggregation (Message Passing)
+                #   msg_v = Σ_{u ∈ N_r(v)} α_vu * h_u
+                #   Kernel: out[dst] += alpha * H[src]. We want out[row] += alpha * H[col],
+                #   so pass col_i as src (row arg) and row_i as dst (col arg).
+                msg = _cuda_kernels.neighbor_aggregation(
+                    H.contiguous(), alpha_sparse, col_i, row_i, N
+                )  # [N, in_dim]
+
+                # [Lec 16-17] Step 2: Tiled MatMul for W_r projection
+                #   out_v = msg_v @ W_r^T
+                W_t = self.W[r].weight.t().contiguous()  # [in_dim, out_dim]
+                transformed = _cuda_kernels.tiled_matmul(msg, W_t)  # [N, out_dim]
+
+                aggregated = aggregated + transformed
+            else:
+                # ═══════════ PHASE 1: DENSE FALLBACK ═══════════
+                # Message: A_norm_r [N, N] @ H [N, in_dim] → [N, in_dim]  then W_r
+                msg = A_r @ H                  # [N, in_dim]
+                aggregated = aggregated + self.W[r](msg)    # [N, out_dim]
 
         if self.bias is not None:
             aggregated = aggregated + self.bias
@@ -108,6 +149,9 @@ class GAEEncoder(nn.Module):
 class GAEDecoder(nn.Module):
     """
     Inner-product decoder: Â = σ(Z Zᵀ)  (Eq. 8).
+
+    [Lec 16-17] Phase 2: Uses custom tiled_matmul CUDA kernel for the
+    Z @ Zᵀ computation, leveraging shared memory tiling.
     """
 
     def forward(self, Z: torch.Tensor) -> torch.Tensor:
@@ -115,6 +159,15 @@ class GAEDecoder(nn.Module):
         Z: [N, embed_dim]
         Returns raw logits: [N, N]  (reconstructed adjacency)
         """
+        if Z.is_cuda and not torch.is_grad_enabled():
+            try:
+                import gnn_cuda_kernels
+                # [Lec 16-17] Tiled MatMul: Z @ Z^T via shared memory tiles
+                return gnn_cuda_kernels.tiled_matmul(
+                    Z.contiguous(), Z.t().contiguous()
+                )
+            except ImportError:
+                pass
         return Z @ Z.t()
 
 

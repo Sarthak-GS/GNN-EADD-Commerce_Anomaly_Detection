@@ -75,44 +75,101 @@ class TypeSpecificGATLayer(nn.Module):
         """
         Returns H_new [N, out_dim].
         If return_attention=True, also returns {rel -> attention_matrix [N,N]}.
+
+        [Lec 2] Phase 2: When CUDA kernels are available and data is on GPU,
+        this method transparently switches from the dense O(N²) PyTorch path
+        to our custom CUDA kernels that operate on sparse edge lists (COO),
+        using tiled_matmul, gat_attention, and neighbor_aggregation kernels.
+        Falls back to the original dense implementation on CPU or when kernels
+        are not compiled.
         """
         N = H.shape[0]
         aggregated = torch.zeros(N, self.out_dim, device=H.device, dtype=H.dtype)
         attn_dict = {}
+
+        # [Lec 4] GPGPU: Use custom CUDA kernels during inference (no_grad).
+        # During training, we use PyTorch ops so autograd can compute gradients.
+        _cuda_kernels = None
+        if H.is_cuda and not torch.is_grad_enabled():
+            try:
+                import gnn_cuda_kernels as _ck
+                _cuda_kernels = _ck
+            except ImportError:
+                pass
 
         for r in self.edge_types:
             A_r = A_per_type.get(r)             # [N, N]
             if A_r is None:
                 continue
 
-            Wh = self.W[r](H)                   # [N, out_dim]  → W_r h
+            if _cuda_kernels is not None:
+                # ═══════════ PHASE 2: CUSTOM CUDA KERNEL PATH ═══════════
+                # [Lec 16-17] Step 1: Tiled MatMul for feature projection
+                #   Wh = H @ W_r^T   using our shared-memory tiled kernel
+                W_t = self.W[r].weight.t().contiguous()     # [in_dim, out_dim]
+                Wh  = _cuda_kernels.tiled_matmul(H.contiguous(), W_t)  # [N, out_dim]
 
-            # Build pairwise concatenation efficiently:
-            # [Wh_i || Wh_j] for each (i,j) where A_r[i,j]=1
-            # In dense mode: broadcast [N, out_dim] -> [N, N, 2*out_dim]
-            Wh_i = Wh.unsqueeze(1).expand(N, N, self.out_dim)  # [N, N, out_dim]
-            Wh_j = Wh.unsqueeze(0).expand(N, N, self.out_dim)  # [N, N, out_dim]
-            pair  = torch.cat([Wh_i, Wh_j], dim=-1)            # [N, N, 2*out_dim]
+                # Extract sparse edge list (COO) from dense adjacency
+                row, col = A_r.nonzero(as_tuple=True)
+                row_i, col_i = row.long().contiguous(), col.long().contiguous()
 
-            # Compute attention logits: e_ij = LeakyReLU(a_r^T [Wh_i || Wh_j])
-            e = F.leaky_relu(
-                (pair * self.a[r]).sum(dim=-1),   # [N, N]
-                negative_slope=self.leaky_slope,
-            )
+                # [Lec 6-7] Step 2: Per-edge GAT attention via thread-per-edge kernel
+                #   e_ij = LeakyReLU( a_r^T [Wh_i || Wh_j] )
+                #   Note: kernel internally computes attn[:D]*Wh[dst] + attn[D:]*Wh[src],
+                #   while PyTorch does attn[:D]*Wh[row] + attn[D:]*Wh[col].
+                #   So we pass col as 'row' and row as 'col' to match semantics.
+                e_sparse = _cuda_kernels.gat_attention(
+                    Wh, col_i, row_i, self.a[r].contiguous(), self.leaky_slope
+                )
 
-            # Mask out non-neighbors:  set to -inf so softmax → 0
-            mask = (A_r == 0)
-            e = e.masked_fill(mask, float('-inf'))
+                # Softmax over neighbors (scatter back to dense for row-wise softmax)
+                e_dense = torch.full((N, N), float('-inf'), device=H.device)
+                e_dense[row, col] = e_sparse
+                alpha = torch.softmax(e_dense, dim=1)
+                alpha = torch.nan_to_num(alpha, nan=0.0)
 
-            # Softmax over neighbors (row-wise) — Eq. 12
-            alpha = torch.softmax(e, dim=1)      # [N, N]
-            # Fix rows with ALL -inf (isolated nodes): set to 0 instead of NaN
-            alpha = torch.nan_to_num(alpha, nan=0.0)
+                alpha_sparse = alpha[row, col].contiguous()
+                attn_dict[r] = alpha
 
-            attn_dict[r] = alpha
+                # [Lec 9,20] Step 3: Neighbor aggregation with atomicAdd
+                #   h'_i = Σ_j α_ij * Wh_j
+                #   Kernel: out[dst] += alpha * Wh[src]. We want out[row] += alpha * Wh[col],
+                #   so pass col_i as src (row arg) and row_i as dst (col arg).
+                agg_r = _cuda_kernels.neighbor_aggregation(
+                    Wh, alpha_sparse, col_i, row_i, N
+                )
+                aggregated = aggregated + agg_r
 
-            # Weighted aggregation: Σ_j α_ij * (W_r h_j)  — Eq. 13
-            aggregated = aggregated + alpha @ Wh  # [N, out_dim]
+            else:
+                # ═══════════ PHASE 1: DENSE FALLBACK (CPU or no kernels) ═══════════
+                Wh = self.W[r](H)                   # [N, out_dim]  → W_r h
+
+                # Build pairwise concatenation efficiently:
+                # [Wh_i || Wh_j] for each (i,j) where A_r[i,j]=1
+                # In dense mode: broadcast [N, out_dim] -> [N, N, 2*out_dim]
+                Wh_i = Wh.unsqueeze(1).expand(N, N, self.out_dim)  # [N, N, out_dim]
+                Wh_j = Wh.unsqueeze(0).expand(N, N, self.out_dim)  # [N, N, out_dim]
+                pair  = torch.cat([Wh_i, Wh_j], dim=-1)            # [N, N, 2*out_dim]
+
+                # Compute attention logits: e_ij = LeakyReLU(a_r^T [Wh_i || Wh_j])
+                e = F.leaky_relu(
+                    (pair * self.a[r]).sum(dim=-1),   # [N, N]
+                    negative_slope=self.leaky_slope,
+                )
+
+                # Mask out non-neighbors:  set to -inf so softmax → 0
+                mask = (A_r == 0)
+                e = e.masked_fill(mask, float('-inf'))
+
+                # Softmax over neighbors (row-wise) — Eq. 12
+                alpha = torch.softmax(e, dim=1)      # [N, N]
+                # Fix rows with ALL -inf (isolated nodes): set to 0 instead of NaN
+                alpha = torch.nan_to_num(alpha, nan=0.0)
+
+                attn_dict[r] = alpha
+
+                # Weighted aggregation: Σ_j α_ij * (W_r h_j)  — Eq. 13
+                aggregated = aggregated + alpha @ Wh  # [N, out_dim]
 
         if self.bias is not None:
             aggregated = aggregated + self.bias
@@ -200,7 +257,26 @@ class GraphAttentionNetwork(nn.Module):
         """
         L_unsup = Σ_{i,j} A_ij ||s_i - s_j||²  (Eq. 17)
         Encourages connected nodes to have similar anomaly scores.
+
+        [Lec 14] Phase 2: Uses custom CUDA kernel with warp-level shuffle
+        reduction (__shfl_down_sync) + atomicAdd for parallel summation
+        over all edges.
         """
+        if s.is_cuda and not torch.is_grad_enabled():
+            try:
+                import gnn_cuda_kernels
+                # Extract sparse edge list from dense adjacency
+                row, col = A.nonzero(as_tuple=True)
+                # [Lec 14] Custom kernel: parallel reduction over edges
+                sum_loss = gnn_cuda_kernels.smoothness_loss(
+                    s.contiguous(), row.long().contiguous(), col.long().contiguous()
+                )
+                # Normalize to match the dense mean reduction (sum / N²)
+                return sum_loss / A.numel()
+            except ImportError:
+                pass
+
+        # ═══════════ PHASE 1: DENSE FALLBACK ═══════════
         # s_i - s_j for all pairs: [N, N]
         diff = s.unsqueeze(1) - s.unsqueeze(0)    # [N, N]
         sq   = diff ** 2                           # [N, N]

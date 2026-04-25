@@ -300,7 +300,7 @@ def run_training(args):
     metrics_test['gae_time'] = gae_time
     metrics_test['gat_time'] = gat_time
 
-    return gae, gat, Z, A_per_type, graph, metrics_test
+    return gae, gat, Z, A_per_type, graph, metrics_test, H, A_norm_per_type
 
 
 def parse_args():
