@@ -172,6 +172,10 @@ def plot_graph_structure(graph, scores: np.ndarray, labels: np.ndarray, save: bo
     N_S = graph.num_nodes_per_type['seller']
     N   = N_P + N_U + N_S
 
+    if N > 2000:
+        print(f"[Plot] Graph too large for networkx spring_layout ({N} nodes). Skipping structure visualization.")
+        return
+
     G = nx.Graph()
     G.add_nodes_from(range(N))
 

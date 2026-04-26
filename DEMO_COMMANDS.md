@@ -65,10 +65,9 @@ python visualize.py
 | `openmp_baseline.py` | Compiles + loads C/OpenMP shared library, provides CPU-parallel baselines |
 | `benchmark.py` | Runs Sequential vs OpenMP vs CUDA timing, generates all performance plots |
 | `run_phase2.py` | Master script: builds kernels → tests correctness → benchmarks → trains → baselines → plots |
-| `train.py` | Phase 1 training pipeline (GAE Stage 1 + GAT Stage 2) |
+| `train_large.py` | Phase 1 training pipeline with PyG Mini-Batching (GAE Stage 1 + GAT Stage 2) |
 | `baseline_comparison.py` | PyTorch Geometric (PyG) dual-stage baseline for accuracy comparison |
 | `visualize.py` | Generates loss curves, anomaly score distributions, ROC/PR curves, graph visualization |
-| `verify.py` | Checkpoint integrity verification (CPU-only) |
 
 ---
 

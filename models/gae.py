@@ -57,6 +57,7 @@ class TypeSpecificGCNLayer(nn.Module):
         self,
         H: torch.Tensor,               # [N, in_dim]  current node features
         A_norm_per_type: Dict[str, torch.Tensor],  # {rel -> [N, N] normalized adj}
+        coo_cache: Dict[str, tuple] = None,  # pre-computed {rel -> (row, col, alpha)}
     ) -> torch.Tensor:
         """
         Returns H_new [N, out_dim].
@@ -65,6 +66,9 @@ class TypeSpecificGCNLayer(nn.Module):
         uses custom neighbor_aggregation kernel for message passing and
         tiled_matmul kernel for the W_r projection. Falls back to dense
         matmul on CPU or when kernels are not compiled.
+
+        coo_cache: Optional pre-computed COO edges. Pass this during repeated
+        inference to skip the expensive A_r.nonzero() extraction every call.
         """
         # We output out_dim, so init shape is (N, out_dim)
         out_dim = list(self.W.values())[0].weight.shape[0]
@@ -88,11 +92,13 @@ class TypeSpecificGCNLayer(nn.Module):
 
             if _cuda_kernels is not None:
                 # ═══════════ PHASE 2: CUSTOM CUDA KERNEL PATH ═══════════
-                # Extract sparse edge list from normalized adjacency
-                row, col = A_r.nonzero(as_tuple=True)
-                row_i, col_i = row.long().contiguous(), col.long().contiguous()
-                # Edge weights are the normalized adjacency values
-                alpha_sparse = A_r[row, col].contiguous()
+                # Use pre-computed COO cache if available (avoids O(N²) nonzero scan)
+                if coo_cache and r in coo_cache:
+                    row_i, col_i, alpha_sparse = coo_cache[r]
+                else:
+                    row, col = A_r.nonzero(as_tuple=True)
+                    row_i, col_i = row.long().contiguous(), col.long().contiguous()
+                    alpha_sparse = A_r[row, col].contiguous()
 
                 # [Lec 9,20] Step 1: Neighbor Aggregation (Message Passing)
                 #   msg_v = Σ_{u ∈ N_r(v)} α_vu * h_u
@@ -102,12 +108,12 @@ class TypeSpecificGCNLayer(nn.Module):
                     H.contiguous(), alpha_sparse, col_i, row_i, N
                 )  # [N, in_dim]
 
-                # [Lec 16-17] Step 2: Tiled MatMul for W_r projection
+                # [Lec 16-17] Step 2: Feature projection W_r
                 #   out_v = msg_v @ W_r^T
-                W_t = self.W[r].weight.t().contiguous()  # [in_dim, out_dim]
-                transformed = _cuda_kernels.tiled_matmul(msg, W_t)  # [N, out_dim]
+                #   Use cuBLAS (PyTorch @) for small projections (faster than tiled kernel)
+                #   Our tiled kernel shines on large square matrices like Z@Z^T in decoder
+                aggregated = aggregated + self.W[r](msg)    # [N, out_dim]
 
-                aggregated = aggregated + transformed
             else:
                 # ═══════════ PHASE 1: DENSE FALLBACK ═══════════
                 # Message: A_norm_r [N, N] @ H [N, in_dim] → [N, in_dim]  then W_r
@@ -137,12 +143,13 @@ class GAEEncoder(nn.Module):
         self,
         H: torch.Tensor,                            # [N, feat_dim]
         A_norm_per_type: Dict[str, torch.Tensor],   # {rel -> [N, N]}
+        coo_cache: Dict[str, tuple] = None,
     ) -> torch.Tensor:
         """
         Returns Z [N, embed_dim].
         """
-        H1 = F.relu(self.layer1(H, A_norm_per_type))   # Eq. 7 layer 1
-        Z  = self.layer2(H1, A_norm_per_type)           # Eq. 7 layer 2 (no activation)
+        H1 = F.relu(self.layer1(H, A_norm_per_type, coo_cache))   # Eq. 7 layer 1
+        Z  = self.layer2(H1, A_norm_per_type, coo_cache)           # Eq. 7 layer 2 (no activation)
         return Z
 
 
@@ -191,8 +198,9 @@ class GraphAutoEncoder(nn.Module):
         self,
         H: torch.Tensor,
         A_norm_per_type: Dict[str, torch.Tensor],
+        coo_cache: Dict[str, tuple] = None,
     ) -> torch.Tensor:
-        return self.encoder(H, A_norm_per_type)
+        return self.encoder(H, A_norm_per_type, coo_cache)
 
     def decode(self, Z: torch.Tensor) -> torch.Tensor:
         return self.decoder(Z)

@@ -171,20 +171,33 @@ def generate_synthetic_graph(
         sp_dst.append(p)
 
     # User-user interaction edges (co-purchasing patterns)
-    # Anomalous users interact more with each other, but not exclusively
+    # Scalable sampling approach (O(N_U) instead of O(N_U^2))
+    anomaly_user_set = set(anomaly_user_idx.tolist())
     uu_src, uu_dst = [], []
+
     for i in range(N_U):
-        for j in range(i + 1, N_U):
-            both_anom = (i in anomaly_user_idx) and (j in anomaly_user_idx)
+        is_anom_i = i in anomaly_user_set
+        # Degree sampling: anomalous users have more connections
+        degree = int(rng.poisson(lam=8 if is_anom_i else 5))
+        degree = max(1, min(degree, N_U - 1))
+
+        # Randomly sample neighbors
+        candidates = rng.choice(N_U, size=degree, replace=False)
+        for j in candidates:
+            if i == j: continue
+            
+            # Keep edge with higher probability if both are anomalous
+            both_anom = is_anom_i and (j in anomaly_user_set)
             if both_anom:
-                prob = 0.25   # higher interaction between anomalous users
-            elif (i in anomaly_user_idx) or (j in anomaly_user_idx):
-                prob = 0.06   # cross-community interactions exist
+                prob = 0.25
+            elif is_anom_i or (j in anomaly_user_set):
+                prob = 0.06
             else:
-                prob = 0.04   # normal user interactions
+                prob = 0.04
+                
             if rng.random() < prob:
-                uu_src.extend([i, j])
-                uu_dst.extend([j, i])
+                uu_src.extend([i, int(j)])
+                uu_dst.extend([int(j), i])
 
     # ── 4. GLOBAL EDGE INDICES ──────────────────────────────────────────────
     edge_index_dict = {}

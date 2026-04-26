@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: gnn_cuda_kernels
+Version: 2.0.0
+Summary: Custom CUDA kernels for GNN-EADD Phase 2

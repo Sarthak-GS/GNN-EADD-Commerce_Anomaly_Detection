@@ -71,6 +71,7 @@ class TypeSpecificGATLayer(nn.Module):
         H: torch.Tensor,                            # [N, in_dim]
         A_per_type: Dict[str, torch.Tensor],        # {rel -> [N, N] binary adj}
         return_attention: bool = False,
+        coo_cache: Dict[str, tuple] = None,         # pre-computed {rel -> (row, col)}
     ):
         """
         Returns H_new [N, out_dim].
@@ -109,9 +110,14 @@ class TypeSpecificGATLayer(nn.Module):
                 W_t = self.W[r].weight.t().contiguous()     # [in_dim, out_dim]
                 Wh  = _cuda_kernels.tiled_matmul(H.contiguous(), W_t)  # [N, out_dim]
 
-                # Extract sparse edge list (COO) from dense adjacency
-                row, col = A_r.nonzero(as_tuple=True)
-                row_i, col_i = row.long().contiguous(), col.long().contiguous()
+                # Use pre-computed COO cache if available (avoids O(N²) nonzero scan)
+                if coo_cache and r in coo_cache:
+                    row_i, col_i = coo_cache[r][:2]
+                    row, col = row_i, col_i
+                else:
+                    # Extract sparse edge list (COO) from dense adjacency
+                    row, col = A_r.nonzero(as_tuple=True)
+                    row_i, col_i = row.long().contiguous(), col.long().contiguous()
 
                 # [Lec 6-7] Step 2: Per-edge GAT attention via thread-per-edge kernel
                 #   e_ij = LeakyReLU( a_r^T [Wh_i || Wh_j] )
@@ -122,14 +128,19 @@ class TypeSpecificGATLayer(nn.Module):
                     Wh, col_i, row_i, self.a[r].contiguous(), self.leaky_slope
                 )
 
-                # Softmax over neighbors (scatter back to dense for row-wise softmax)
-                e_dense = torch.full((N, N), float('-inf'), device=H.device)
-                e_dense[row, col] = e_sparse
-                alpha = torch.softmax(e_dense, dim=1)
-                alpha = torch.nan_to_num(alpha, nan=0.0)
-
-                alpha_sparse = alpha[row, col].contiguous()
-                attn_dict[r] = alpha
+                # ── Sparse segment-wise softmax (O(E), no N×N matrix!) ──────
+                # Group logits by destination node (row), subtract max for
+                # numerical stability, then normalise — standard trick.
+                row_dst = row                           # destination nodes [E]
+                # max per destination node
+                e_max = torch.full((N,), float('-inf'), device=H.device)
+                e_max.scatter_reduce_(0, row_dst, e_sparse, reduce='amax', include_self=True)
+                e_shifted = (e_sparse - e_max[row_dst]).exp()   # [E]
+                # sum per destination node
+                e_sum = torch.zeros(N, device=H.device)
+                e_sum.scatter_add_(0, row_dst, e_shifted)
+                alpha_sparse = (e_shifted / e_sum[row_dst].clamp(min=1e-12)).contiguous()
+                attn_dict[r] = None   # not building dense attn in CUDA path (saves memory)
 
                 # [Lec 9,20] Step 3: Neighbor aggregation with atomicAdd
                 #   h'_i = Σ_j α_ij * Wh_j
@@ -141,35 +152,47 @@ class TypeSpecificGATLayer(nn.Module):
                 aggregated = aggregated + agg_r
 
             else:
-                # ═══════════ PHASE 1: DENSE FALLBACK (CPU or no kernels) ═══════════
-                Wh = self.W[r](H)                   # [N, out_dim]  → W_r h
+                # ═══════════ PHASE 1: SEMI-SPARSE FALLBACK (CPU / training) ═══════════
+                Wh = self.W[r](H)                   # [N, out_dim]
 
-                # Build pairwise concatenation efficiently:
-                # [Wh_i || Wh_j] for each (i,j) where A_r[i,j]=1
-                # In dense mode: broadcast [N, out_dim] -> [N, N, 2*out_dim]
-                Wh_i = Wh.unsqueeze(1).expand(N, N, self.out_dim)  # [N, N, out_dim]
-                Wh_j = Wh.unsqueeze(0).expand(N, N, self.out_dim)  # [N, N, out_dim]
-                pair  = torch.cat([Wh_i, Wh_j], dim=-1)            # [N, N, 2*out_dim]
+                if coo_cache and r in coo_cache:
+                    row, col = coo_cache[r][:2]
+                else:
+                    row, col = A_r.nonzero(as_tuple=True)
+                if row.numel() > 0:
+                    # Compute attention only on existing edges — O(E), not O(N²)
+                    Wh_row = Wh[row]                              # [E, out_dim]
+                    Wh_col = Wh[col]                              # [E, out_dim]
+                    pair   = torch.cat([Wh_row, Wh_col], dim=-1) # [E, 2*out_dim]
 
-                # Compute attention logits: e_ij = LeakyReLU(a_r^T [Wh_i || Wh_j])
-                e = F.leaky_relu(
-                    (pair * self.a[r]).sum(dim=-1),   # [N, N]
-                    negative_slope=self.leaky_slope,
-                )
+                    # e_ij = LeakyReLU(a_r^T [Wh_i || Wh_j])  (Eq. 12)
+                    e_sparse = F.leaky_relu(
+                        (pair * self.a[r]).sum(dim=-1),
+                        negative_slope=self.leaky_slope
+                    )  # [E]
 
-                # Mask out non-neighbors:  set to -inf so softmax → 0
-                mask = (A_r == 0)
-                e = e.masked_fill(mask, float('-inf'))
+                    # Sparse segment-wise softmax — no N×N matrix ever allocated
+                    e_max = torch.full((N,), float('-inf'), device=H.device, dtype=H.dtype)
+                    e_max.scatter_reduce_(0, row, e_sparse, reduce='amax', include_self=True)
+                    e_shifted = (e_sparse - e_max[row]).exp()
+                    e_sum = torch.zeros(N, device=H.device, dtype=H.dtype)
+                    e_sum.scatter_add_(0, row, e_shifted)
+                    alpha_sparse = e_shifted / e_sum[row].clamp(min=1e-12)  # [E]
 
-                # Softmax over neighbors (row-wise) — Eq. 12
-                alpha = torch.softmax(e, dim=1)      # [N, N]
-                # Fix rows with ALL -inf (isolated nodes): set to 0 instead of NaN
-                alpha = torch.nan_to_num(alpha, nan=0.0)
+                    # Weighted scatter-add aggregation: out[row] += alpha * Wh[col]
+                    agg_r = torch.zeros(N, self.out_dim, device=H.device, dtype=H.dtype)
+                    agg_r.scatter_add_(
+                        0,
+                        row.unsqueeze(1).expand(-1, self.out_dim),
+                        alpha_sparse.unsqueeze(1) * Wh_col
+                    )
 
-                attn_dict[r] = alpha
+                    attn_dict[r] = None   # sparse path: no dense attn matrix stored
+                else:
+                    agg_r = torch.zeros(N, self.out_dim, device=H.device, dtype=H.dtype)
+                    attn_dict[r] = None
 
-                # Weighted aggregation: Σ_j α_ij * (W_r h_j)  — Eq. 13
-                aggregated = aggregated + alpha @ Wh  # [N, out_dim]
+                aggregated = aggregated + agg_r
 
         if self.bias is not None:
             aggregated = aggregated + self.bias
@@ -206,12 +229,13 @@ class GraphAttentionNetwork(nn.Module):
         Z: torch.Tensor,                        # [N, embed_dim]  — from GAE Stage 1
         A_per_type: Dict[str, torch.Tensor],    # {rel -> [N, N]}
         return_attention: bool = False,
+        coo_cache: Dict[str, tuple] = None,
     ):
         """
         Returns anomaly scores s: [N] ∈ (0, 1).
         """
-        H1 = F.relu(self.layer1(Z, A_per_type))   # [N, hidden_dim]
-        H2, attn = self.layer2(H1, A_per_type, return_attention=True)  # [N, hidden_dim]
+        H1 = F.relu(self.layer1(Z, A_per_type, coo_cache=coo_cache))   # [N, hidden_dim]
+        H2, attn = self.layer2(H1, A_per_type, return_attention=True, coo_cache=coo_cache)  # [N, hidden_dim]
         H2 = F.relu(H2)
 
         # Anomaly score: s_i = σ(W_f h'_i + b_f)  (Eq. 14)
@@ -276,11 +300,15 @@ class GraphAttentionNetwork(nn.Module):
             except ImportError:
                 pass
 
-        # ═══════════ PHASE 1: DENSE FALLBACK ═══════════
-        # s_i - s_j for all pairs: [N, N]
-        diff = s.unsqueeze(1) - s.unsqueeze(0)    # [N, N]
-        sq   = diff ** 2                           # [N, N]
-        return (A * sq).mean()  # consistent with L_sup which also uses mean
+        # ═══════════ PHASE 1: SEMI-DENSE FALLBACK ═══════════
+        # Calculate loss only on existing edges to avoid O(N^2) memory
+        row, col = A.nonzero(as_tuple=True)
+        diff = s[row] - s[col]
+        sq = diff ** 2
+        
+        if A.numel() == 0:
+            return torch.tensor(0.0, device=s.device)
+        return sq.sum() / A.numel()  # consistent with mean over [N, N] matrix
 
     @staticmethod
     def combined_loss(

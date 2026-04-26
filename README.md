@@ -13,10 +13,10 @@ The project detects anomalous behaviour in an e-commerce platform using a dual-s
 - `data/graph_builder.py`: Generates the synthetic heterogeneous graph.
 - `models/gae.py`: Stage 1 Unsupervised PyTorch models.
 - `models/gat.py`: Stage 2 Semi-supervised PyTorch models.
-- `train.py`: Main dual-stage training loop.
+- `train_large.py`: Main dual-stage training loop (with PyG Mini-Batching for massive graphs).
 - `baseline_comparison.py`: Evaluates against PyTorch Geometric references.
 - `visualize.py`: Generates plots (Loss curves, Anomaly distributions, Graph visualisations).
-- `run_all.py`: Runs the entire pipeline sequentially.
+- `run_phase2.py`: Master script to run training, benchmarks, and custom CUDA inference.
 
 ## Setup & Execution
 
@@ -38,9 +38,9 @@ The graph generation is now decoupled from model training. First, generate the s
 python generate_data.py --output data/graph.pt
 ```
 
-Then, to run the complete pipeline (GAE -> GAT -> Plotting -> Metric evaluation):
+Then, to run the complete pipeline (GAE -> GAT -> Inference Benchmarks -> Plotting):
 ```bash
-python run_all.py --graph_path data/graph.pt
+python run_phase2.py --graph_path data/graph.pt
 ```
 
 ## Using Your Own Dataset
@@ -95,7 +95,7 @@ If you want to train the model manually on a custom dataset rather than the synt
    ```
 5. **Feed it to the pipeline:** You can then pass this saved file to the training pipeline using the `--graph_path` argument:
    ```bash
-   python train.py --graph_path data/my_custom_graph.pt
+   python run_phase2.py --graph_path data/my_custom_graph.pt
    ```
 
 ## Command-Line Arguments
@@ -110,7 +110,7 @@ The pipeline is highly customizable. You can modify the architecture and trainin
 - `--seed` (default: 42): Random seed for reproducibility.
 - `--output` (default: `data/graph.pt`): Where to save the generated graph.
 
-### Training & Evaluation (`run_all.py` / `train.py`)
+### Training & Evaluation (`run_phase2.py` / `train_large.py`)
 - `--graph_path` (default: `data/graph.pt`): Path to the generated graph file.
 - `--gae_epochs` (default: 200): Total epochs for Stage 1 Unsupervised Training.
 - `--gat_epochs` (default: 100): Total epochs for Stage 2 Semi-Supervised Training.
@@ -119,4 +119,4 @@ The pipeline is highly customizable. You can modify the architecture and trainin
 - `--lr` (default: 1e-3): Learning rate for both models.
 - `--lam` (default: 0.5): Lambda hyperparameter controlling the balance between the supervised loss and the unsupervised smoothness penalty.
 - `--results_dir` (default: `results`): Directory to save plots.
-- `--skip_baselines`: Add this flag to run_all.py to skip executing the PyTorch Geometric reference baseline.
+- `--skip_baselines`: Add this flag to `run_phase2.py` to skip executing the PyTorch Geometric reference baseline.

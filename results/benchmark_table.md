@@ -10,16 +10,16 @@
 
 | Size | Sequential | OpenMP | CUDA |
 |---|---|---|---|
-| Small (1K) | 1.502 ms | 0.013 ms | 0.025 ms |
-| Medium (10K) | 13.036 ms | 0.022 ms | 0.019 ms |
-| Large (50K) | N/A | 0.099 ms | 0.076 ms |
+| Small (1K) | 1.812 ms | 0.023 ms | 0.026 ms |
+| Medium (10K) | 17.833 ms | 0.036 ms | 0.023 ms |
+| Large (50K) | N/A | 0.095 ms | 0.019 ms |
 
 ### Speedup vs Sequential
 
 | Size | OpenMP Speedup | CUDA Speedup |
 |---|---|---|
-| Small (1K) | 116.7× | 61.2× |
-| Medium (10K) | 596.9× | 669.3× |
+| Small (1K) | 77.8× | 68.8× |
+| Medium (10K) | 499.4× | 780.2× |
 | Large (50K) | N/A | N/A |
 
 ## GAT Attention
@@ -28,16 +28,16 @@
 
 | Size | Sequential | OpenMP | CUDA |
 |---|---|---|---|
-| Small (1K) | 106.681 ms | 0.081 ms | 0.074 ms |
-| Medium (10K) | 1076.549 ms | 0.673 ms | 1.056 ms |
-| Large (50K) | N/A | 3.811 ms | 13.725 ms |
+| Small (1K) | 164.567 ms | 0.192 ms | 0.034 ms |
+| Medium (10K) | 1258.180 ms | 0.502 ms | 0.069 ms |
+| Large (50K) | N/A | 2.163 ms | 0.492 ms |
 
 ### Speedup vs Sequential
 
 | Size | OpenMP Speedup | CUDA Speedup |
 |---|---|---|
-| Small (1K) | 1320.5× | 1442.3× |
-| Medium (10K) | 1600.0× | 1019.0× |
+| Small (1K) | 857.7× | 4850.3× |
+| Medium (10K) | 2508.8× | 18144.2× |
 | Large (50K) | N/A | N/A |
 
 ## Neighbor Aggregation
@@ -46,16 +46,16 @@
 
 | Size | Sequential | OpenMP | CUDA |
 |---|---|---|---|
-| Small (1K) | 115.387 ms | 0.295 ms | 0.025 ms |
-| Medium (10K) | 1177.147 ms | 2.608 ms | 0.393 ms |
-| Large (50K) | N/A | 13.531 ms | 2.289 ms |
+| Small (1K) | 134.573 ms | 0.486 ms | 0.019 ms |
+| Medium (10K) | 1041.982 ms | 1.957 ms | 0.035 ms |
+| Large (50K) | N/A | 9.655 ms | 0.245 ms |
 
 ### Speedup vs Sequential
 
 | Size | OpenMP Speedup | CUDA Speedup |
 |---|---|---|
-| Small (1K) | 391.2× | 4669.6× |
-| Medium (10K) | 451.3× | 2995.1× |
+| Small (1K) | 276.8× | 7209.7× |
+| Medium (10K) | 532.5× | 29618.0× |
 | Large (50K) | N/A | N/A |
 
 ## Matrix Multiply
@@ -64,9 +64,9 @@
 
 | Size | Sequential | OpenMP | CUDA |
 |---|---|---|---|
-| Small (1K) | N/A | 0.061 ms | 0.024 ms |
-| Medium (10K) | N/A | 0.064 ms | 0.025 ms |
-| Large (50K) | N/A | 0.071 ms | 0.029 ms |
+| Small (1K) | N/A | 0.087 ms | 0.017 ms |
+| Medium (10K) | N/A | 0.064 ms | 0.012 ms |
+| Large (50K) | N/A | 0.050 ms | 0.012 ms |
 
 
 ## Amdahl's Law Analysis [Lec 3]
@@ -76,9 +76,9 @@ using: P = (1 - 1/S) / (1 - 1/N)
 
 | Operation | Measured CUDA Speedup | Est. Parallel Fraction P | Theoretical Max Speedup (∞ cores) |
 |---|---|---|---|
-| Smoothness Loss | 669.3× | 1.0000 | inf× |
-| GAT Attention | 1019.0× | 1.0000 | inf× |
-| Neighbor Aggregation | 2995.1× | 1.0000 | inf× |
+| Smoothness Loss | 780.2× | 1.0000 | inf× |
+| GAT Attention | 18144.2× | 1.0000 | inf× |
+| Neighbor Aggregation | 29618.0× | 1.0000 | inf× |
 | Matrix Multiply | N/A | N/A | N/A |
 
 
@@ -86,9 +86,9 @@ using: P = (1 - 1/S) / (1 - 1/N)
 
 | Resource | Specification |
 |---|---|
-| GPU | NVIDIA GeForce RTX 2050 |
-| GPU Memory | 3.7 GB |
+| GPU | NVIDIA RTX A6000 |
+| GPU Memory | 47.4 GB |
 | Compute Capability | 8.6 |
-| CPU Cores | 16 |
+| CPU Cores | 24 |
 | CUDA Version | 12.1 |
-| PyTorch Version | 2.5.1+cu121 |
+| PyTorch Version | 2.2.1+cu121 |

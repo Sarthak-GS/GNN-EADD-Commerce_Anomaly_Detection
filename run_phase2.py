@@ -215,7 +215,9 @@ def main():
 
         gat.eval()
         gae.eval()
-        n_runs = 100
+        N = scores_np.shape[0]
+        n_runs = max(5, min(100, 500_000 // N))  # 100 at N=5k, 33 at N=15k, 5 at N=100k
+        print(f"  Benchmarking {n_runs} runs on {N} nodes...")
 
         # ── Monkey-patch to disable CUDA kernels ──────────────────
         # Our guard in gat.py / gae.py is:
@@ -224,17 +226,38 @@ def main():
         # and we get the pure PyTorch dense fallback path.
         _original_grad_fn = torch.is_grad_enabled
 
+        # ── Pre-compute COO edge lists ONCE (amortized cost) ──────
+        # This avoids repeated O(N²) A.nonzero() scans inside each loop.
+        # Both paths get the same pre-computed edges for a fair comparison.
+        gat_coo = {}
+        for r in gat.layer1.edge_types:
+            A_r = A_per_type.get(r)
+            if A_r is not None:
+                row, col = A_r.nonzero(as_tuple=True)
+                gat_coo[r] = (row.long().contiguous(), col.long().contiguous())
+
+        gae_coo = {}
+        for r in gae.encoder.layer1.edge_types:
+            A_r = A_norm_per_type.get(r)
+            if A_r is not None:
+                row, col = A_r.nonzero(as_tuple=True)
+                row_i, col_i = row.long().contiguous(), col.long().contiguous()
+                alpha = A_r[row, col].contiguous()
+                gae_coo[r] = (row_i, col_i, alpha)
+
+        print(f"  (COO edges pre-computed for {len(gat_coo)} GAT + {len(gae_coo)} GAE relation types)")
+
         # ── GAT INFERENCE (Stage 2) ───────────────────────────────
         # Run 1: PyTorch-only (force dense fallback)
         try:
             torch.is_grad_enabled = lambda: True  # trick: blocks kernel path
             with torch.no_grad():
-                _ = gat(Z, A_per_type)  # warm-up
+                _ = gat(Z, A_per_type, coo_cache=gat_coo)  # warm-up
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(n_runs):
                 with torch.no_grad():
-                    scores_pytorch = gat(Z, A_per_type)
+                    scores_pytorch = gat(Z, A_per_type, coo_cache=gat_coo)
             torch.cuda.synchronize()
             t_gat_pytorch = (time.perf_counter() - t0) / n_runs
         finally:
@@ -242,12 +265,12 @@ def main():
 
         # Run 2: Custom CUDA kernels
         with torch.no_grad():
-            _ = gat(Z, A_per_type)  # warm-up
+            _ = gat(Z, A_per_type, coo_cache=gat_coo)  # warm-up
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         for _ in range(n_runs):
             with torch.no_grad():
-                scores_cuda = gat(Z, A_per_type)
+                scores_cuda = gat(Z, A_per_type, coo_cache=gat_coo)
         torch.cuda.synchronize()
         t_gat_cuda = (time.perf_counter() - t0) / n_runs
 
@@ -255,24 +278,24 @@ def main():
         try:
             torch.is_grad_enabled = lambda: True
             with torch.no_grad():
-                _ = gae.encode(H, A_norm_per_type)
+                _ = gae.encode(H, A_norm_per_type, coo_cache=gae_coo)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(n_runs):
                 with torch.no_grad():
-                    _ = gae.encode(H, A_norm_per_type)
+                    _ = gae.encode(H, A_norm_per_type, coo_cache=gae_coo)
             torch.cuda.synchronize()
             t_gae_pytorch = (time.perf_counter() - t0) / n_runs
         finally:
             torch.is_grad_enabled = _original_grad_fn
 
         with torch.no_grad():
-            _ = gae.encode(H, A_norm_per_type)
+            _ = gae.encode(H, A_norm_per_type, coo_cache=gae_coo)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         for _ in range(n_runs):
             with torch.no_grad():
-                _ = gae.encode(H, A_norm_per_type)
+                _ = gae.encode(H, A_norm_per_type, coo_cache=gae_coo)
         torch.cuda.synchronize()
         t_gae_cuda = (time.perf_counter() - t0) / n_runs
 

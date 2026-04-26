@@ -288,7 +288,11 @@ def _plot_accuracy_comparison(save_dir):
         
     ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     metrics_ours = ckpt.get('metrics_test', {})
-    metrics_pyg = np.load(pyg_metrics_path, allow_pickle=True).item()
+    try:
+        metrics_pyg = np.load(pyg_metrics_path, allow_pickle=True).item()
+    except Exception as e:
+        print(f"[Plot] Skipping accuracy comparison (NumPy version mismatch: {e})")
+        return
     
     metrics = ['AUC-ROC', 'AUC-PR', 'F1-Score']
     ours_vals = [metrics_ours.get('auc_roc', 0), metrics_ours.get('auc_pr', 0), metrics_ours.get('f1', 0)]
