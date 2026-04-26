@@ -1,0 +1,43 @@
+{
+  "approaches": {
+    "GNN-EADD custom": {
+      "auc_roc": 0.9602291877317155,
+      "auc_pr": 0.782832113365401,
+      "f1": 0.7755102040816326,
+      "precision": 0.7307692307692307,
+      "recall": 0.8260869565217391,
+      "prec_at_k": 0.75,
+      "recall_at_k": 0.6521739130434783,
+      "approach_name": "GNN-EADD custom",
+      "backend": "sequential",
+      "decoder_type": "inner_product",
+      "gae_time": 0.4102621078491211,
+      "gat_time": 9.86457896232605
+    },
+    "CUDA-OpenMP+MLP": {
+      "auc_roc": 0.9558476575665656,
+      "auc_pr": 0.8179335807236835,
+      "f1": 0.7659574468085106,
+      "precision": 0.75,
+      "recall": 0.782608695652174,
+      "prec_at_k": 0.8,
+      "recall_at_k": 0.6956521739130435,
+      "approach_name": "CUDA-OpenMP+MLP",
+      "backend": "openmp",
+      "decoder_type": "asymmetric_mlp",
+      "gae_time": 22.542617797851562,
+      "gat_time": 9.562177658081055
+    },
+    "PyG Type-Specific (3rd-party GPU)": {
+      "auc_roc": 0.967644084934277,
+      "auc_pr": 0.825294098902834,
+      "f1": 0.8163265306122449,
+      "precision": 0.7692307692307693,
+      "recall": 0.8695652173913043,
+      "prec_at_k": 0.75,
+      "recall_at_k": 0.6521739130434783,
+      "gae_time": 0.6551179885864258,
+      "gat_time": 0.618584394454956
+    }
+  }
+}

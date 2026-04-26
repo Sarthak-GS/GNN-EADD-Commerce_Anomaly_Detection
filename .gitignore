@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+*.so
+*.egg-info/
+build/
+dist/
+
+# Extra docs (not for prof)
+EX/
+
+# Large data files (optional)
+# *.pt
+# results/real-data/
+results.zip
+*.pt
