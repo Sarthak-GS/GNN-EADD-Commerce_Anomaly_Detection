@@ -1,28 +1,14 @@
-"""
-visualize.py  —  Plots for GNN-EADD Phase 1
-
-Generates:
-  1. Loss curves for GAE and GAT stages
-  2. Anomaly score distribution (normal vs anomalous nodes)
-  3. Graph structure visualization (colour-coded by type and anomaly status)
-  4. Attention weight heatmap for a sample node
-  5. ROC and PR curves
-
-Why do programmers prefer dark mode? Because light attracts bugs.
-"""
-
 import sys
 import os
 import torch
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')   # non-interactive backend (safe for headless)
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 from sklearn.metrics import roc_curve, precision_recall_curve
 
-# Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from data.graph_builder import generate_synthetic_graph
@@ -38,25 +24,22 @@ from train import EDGE_TYPES
 SAVE_DIR = Path('results')
 SAVE_DIR.mkdir(exist_ok=True)
 
-# ── PALETTE ──────────────────────────────────────────────────────────────────
-C_PRODUCT  = '#4C72B0'   # blue
-C_USER     = '#55A868'   # green
-C_SELLER   = '#C44E52'   # red-ish (normal seller)
-C_ANOMALY  = '#DD8452'   # orange — anomalous node highlight
-C_NORMAL   = '#6c757d'   # grey
+C_PRODUCT  = '#4C72B0'
+C_USER     = '#55A868'
+C_SELLER   = '#C44E52'
+C_ANOMALY  = '#DD8452'
+C_NORMAL   = '#6c757d'
 
 
 def plot_loss_curves(gae_losses: list, gat_history: list, save: bool = True):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    # GAE loss
     axes[0].plot(gae_losses, color='#4C72B0', linewidth=1.5)
     axes[0].set_title('Stage 1 — GAE Reconstruction Loss', fontsize=12)
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('BCE Loss')
     axes[0].grid(True, alpha=0.3)
 
-    # GAT losses
     epochs = range(1, len(gat_history) + 1)
     total  = [h[0] for h in gat_history]
     sup    = [h[1] for h in gat_history]
@@ -79,13 +62,8 @@ def plot_loss_curves(gae_losses: list, gat_history: list, save: bool = True):
 
 
 def plot_anomaly_scores(scores: np.ndarray, labels: np.ndarray, node_types: np.ndarray, save: bool = True):
-    """
-    Histogram of anomaly scores split by normal / anomalous.
-    Also shows per-node-type breakdown.
-    """
     fig, axes = plt.subplots(1, 2, figsize=(13, 4))
 
-    # Overall distribution
     normal_scores  = scores[labels == 0]
     anomaly_scores = scores[labels == 1]
     bins = np.linspace(0, 1, 30)
@@ -98,7 +76,6 @@ def plot_anomaly_scores(scores: np.ndarray, labels: np.ndarray, node_types: np.n
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # Per-node-type breakdown
     type_names  = ['Product', 'User', 'Seller']
     type_colors = [C_PRODUCT, C_USER, C_SELLER]
     x_pos = np.arange(len(type_names))
@@ -124,10 +101,8 @@ def plot_anomaly_scores(scores: np.ndarray, labels: np.ndarray, node_types: np.n
 
 
 def plot_roc_pr(scores: np.ndarray, labels: np.ndarray, save: bool = True):
-    """ROC curve and Precision-Recall curve."""
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 
-    # ROC
     fpr, tpr, _ = roc_curve(labels, scores)
     from sklearn.metrics import auc
     roc_auc = auc(fpr, tpr)
@@ -139,7 +114,6 @@ def plot_roc_pr(scores: np.ndarray, labels: np.ndarray, save: bool = True):
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # PR
     prec, rec, _ = precision_recall_curve(labels, scores)
     pr_auc = auc(rec, prec)
     axes[1].plot(rec, prec, color='#C44E52', linewidth=2, label=f'AUC-PR = {pr_auc:.4f}')
@@ -158,12 +132,6 @@ def plot_roc_pr(scores: np.ndarray, labels: np.ndarray, save: bool = True):
 
 
 def plot_graph_structure(graph, scores: np.ndarray, labels: np.ndarray, save: bool = True):
-    """
-    Spring-layout visualization of the graph with:
-      - Node colour = type (product/user/seller)
-      - Node border  = red if anomalous, grey if normal
-      - Node size    = proportional to anomaly score
-    """
     try:
         import networkx as nx
     except ImportError:
@@ -182,7 +150,6 @@ def plot_graph_structure(graph, scores: np.ndarray, labels: np.ndarray, save: bo
     G = nx.Graph()
     G.add_nodes_from(range(N))
 
-    # Add edges
     ei = graph.edge_index_dict.get(('product', 'purchase', 'user'),
                                    torch.zeros(2, 0, dtype=torch.long))
     for p, u in zip(ei[0].tolist(), ei[1].tolist()):
@@ -212,7 +179,6 @@ def plot_graph_structure(graph, scores: np.ndarray, labels: np.ndarray, save: bo
                            node_size=node_sizes, ax=ax)
     nx.draw_networkx_edges(G, pos, alpha=0.3, edge_color='#888888', ax=ax)
 
-    # Labels (only for anomalous nodes)
     anom_labels = {i: f"{'P' if i<N_P else 'U' if i<N_P+N_U else 'S'}{i}"
                    for i in range(N) if labels[i] == 1}
     nx.draw_networkx_labels(G, pos, labels=anom_labels, font_size=7,
@@ -250,7 +216,6 @@ def make_all_plots(
 
 
 if __name__ == '__main__':
-    # Load saved checkpoint and regenerate plots
     ckpt_path = SAVE_DIR / 'checkpoint.pt'
     if not ckpt_path.exists():
         print(f"[Error] Run train.py first to generate {ckpt_path}")
@@ -260,7 +225,6 @@ if __name__ == '__main__':
     print(f"[Loaded] checkpoint from {ckpt_path}")
     print(f"  Metrics (all nodes): {ckpt['metrics_all']}")
 
-    # Re-build graph for visualization
     set_seed(42)
     graph = generate_synthetic_graph()
     N_P = graph.num_nodes_per_type['product']

@@ -1,16 +1,4 @@
-"""
-setup.py — Build script for GNN-EADD CUDA kernels (PyTorch C++ Extension)
 
-[Lec 4] GPGPU Computing: This setup script compiles our custom CUDA kernels
-into a loadable Python module using PyTorch's CUDAExtension. After
-installation, the kernels are callable as normal Python functions while
-executing on the GPU.
-
-Usage:
-    pip install -e .                    # editable install (recommended)
-    python setup.py install             # standard install
-    python setup.py build_ext --inplace # build in-place (alternative)
-"""
 
 import os
 from setuptools import setup, find_packages

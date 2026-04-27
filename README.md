@@ -1,81 +1,109 @@
-# GNN-EADD: E-Commerce Anomaly Detection via Dual-Stage Learning
+# GNN-EADD
 
-This repository implements GNN-EADD, a Graph Neural Network framework designed for anomaly detection in heterogeneous e-commerce environments. It utilizes a two-stage approach: unsupervised representation learning via Graph Auto-Encoders (GAE) and semi-supervised classification via Graph Attention Networks (GAT).
+GNN-EADD is a graph neural network pipeline for anomaly detection in heterogeneous e-commerce graphs. It uses two stages:
 
-## Project Architecture
+1. Graph Auto-Encoder (GAE) for representation learning.
+2. Graph Attention Network (GAT) for anomaly classification.
 
-The codebase is organized into several key modules:
+## Repository Layout
 
-- **root/**: Core training and execution entry points.
-- **models/**: Implementation of GAE and GAT architectures using type-specific layers.
-- **data/**: Scripts for synthetic graph generation and real-world data processing.
-- **scripts/**: Evaluation tools for benchmarking, baselines, and plotting.
-- **utils/**: Shared mathematical utilities and performance metrics.
-- **kernels/**: Custom CUDA and OpenMP parallel operations for acceleration.
+- [data/](data/) - synthetic data generation and real-data preprocessing.
+- [models/](models/) - GAE and GAT model definitions.
+- [scripts/](scripts/) - benchmarking, baselines, and visualisation utilities.
+- [utils/](utils/) - shared helpers and metrics.
+- [csrc/](csrc/) and [build_openmp/](build_openmp/) - custom CUDA and OpenMP kernels.
 
-## Getting Started
+## Requirements
 
-### 1. Installation
-Install the required dependencies using pip:
+Before installing, make sure your PyTorch build matches the CUDA version on your machine.
+
+- If your system CUDA toolkit is `cu118`, install a PyTorch wheel built for CUDA 11.8.
+- If your system CUDA toolkit is `cu121`, install a PyTorch wheel built for CUDA 12.1.
+- Do not mix a PyTorch CPU wheel with CUDA extension builds.
+- Rebuild the extension after changing either PyTorch or CUDA versions.
+
+Recommended checks:
+
+```bash
+nvidia-smi
+nvcc --version
+python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
+```
+
+## Installation
+
+Install the Python dependencies first:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-Compile the custom CUDA kernels for hardware acceleration:
+Then build the CUDA extension in editable mode:
+
 ```bash
-pip install -e .
+pip install -e . --no-build-isolation
 ```
 
-### 2. Data Preparation
-Generate a synthetic heterogeneous graph with products, users, and sellers:
+If you use a GPU, verify that `torch.version.cuda` matches the CUDA toolchain used to build the extension.
+
+## Data Preparation
+
+Generate a synthetic graph:
+
 ```bash
 python data/generate_data.py --n_products 500 --n_users 200 --output data/graph.pt
 ```
 
-For real-world datasets (e.g., Amazon All Beauty), use the processing script:
-```bash
-python data/process_real_data.py
+## Training
+
+ 4. Train the Model (This takes time, let it finish)
+ We skip benchmarks here, just getting the weights saved to results/checkpoint.pt
+ ```bash
+python run_phase2.py --skip_benchmark --graph_path data/graph.pt
 ```
 
-### 3. Training the Model
-Train the dual-stage pipeline on the generated graph:
-```bash
-python train.py --graph_path data/graph.pt
-```
 
-For large-scale graphs (e.g., >100k nodes), use the memory-efficient mini-batch trainer:
+Train the large-graph variant:
+
 ```bash
 python train_large.py --graph_path data/real_graph.pt --batch_size 1024
 ```
 
-### 4. Performance Benchmarking
-Compare the execution times of Sequential, OpenMP, and CUDA implementations:
-```bash
-python scripts/benchmark.py
-```
+Run the full phase-2 flow:
 
-Run the master pipeline to execute all tests, benchmarks, and training in one go:
 ```bash
 python run_phase2.py --graph_path data/graph.pt
 ```
 
-### 5. Visualization and Analysis
-Generate loss curves, ROC/PR curves, and graph structure plots:
+
+if already trained
+
 ```bash
-python scripts/visualize.py
+python run_phase2.py --skip_training --graph_path data/graph.pt
 ```
 
-Compare results against professional 3rd-party GNN frameworks (PyG):
+## Benchmarking
+
+Compare sequential, OpenMP, and CUDA execution:
+
+```bash
+python scripts/benchmark.py
+```
+
+Run baseline comparisons:
+
 ```bash
 python scripts/baseline_comparison.py
 ```
 
-## Key Features
+## Visualisation
 
-- **Dual-Stage Learning**: Decouples representation learning from anomaly classification for stability.
-- **Heterogeneous Support**: Handles multiple node and edge types with specific attention mechanisms.
-- **Hardware Acceleration**: Custom CUDA kernels optimized for sparse graph operations.
-- **Scalability**: Support for mini-batch training enables processing of massive e-commerce datasets.
+Generate the plots saved under `results/`:
 
-## Note on Custom Data
-To use your own data, ensure it follows the HeteroGraph structure defined in `data/graph_builder.py` and save it as a `.pt` file compatible with the training scripts.
+```bash
+python scripts/visualize.py
+```
+
+## Custom Data
+
+Custom datasets should follow the heterogeneous graph structure defined in [data/graph_builder.py](data/graph_builder.py) and be saved as a `.pt` file compatible with the training scripts.

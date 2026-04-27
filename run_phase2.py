@@ -123,7 +123,7 @@ def main():
     p.add_argument('--lam',            type=float, default=0.5)
     p.add_argument('--seed',           type=int, default=42)
     p.add_argument('--results_dir',    type=str, default='results')
-    p.add_argument('--skip_baselines', action='store_true')
+    p.add_argument('--skip_baselines', action='store_false')
     p.add_argument('--skip_benchmark', action='store_true')
     p.add_argument('--skip_training',  action='store_true')
     p.add_argument('--include_xlarge', action='store_true')
@@ -205,14 +205,7 @@ def main():
         scores_np, labels_np, node_types_np, graph
     )
 
-    # ══════════════════════════════════════════════════════════════
-    # Step 5b: INFERENCE SPEED COMPARISON — CUDA Kernels vs PyTorch
-    # ══════════════════════════════════════════════════════════════
-    # This is the KEY Phase 2 demonstration:
-    #   → Train once using PyTorch (with autograd for backward pass)
-    #   → Run inference TWICE: once with native PyTorch, once with
-    #     our custom CUDA kernels
-    #   → Prove: SAME accuracy, DIFFERENT speed
+  
     if has_cuda:
         print("\n" + "="*60)
         print("  INFERENCE COMPARISON: CUDA Kernels vs PyTorch-Only")

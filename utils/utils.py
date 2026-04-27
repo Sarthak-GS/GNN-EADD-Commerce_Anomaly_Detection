@@ -56,8 +56,9 @@ def build_homogeneous_features(graph, device) -> torch.Tensor:
     max_dim = max(x.shape[1] for x in xs)
     padded = []
     for x in xs:
+        x = x.float()
         if x.shape[1] < max_dim:
-            x = torch.cat([x, torch.zeros(x.shape[0], max_dim - x.shape[1])], dim=1)
+            x = torch.cat([x, torch.zeros(x.shape[0], max_dim - x.shape[1], dtype=x.dtype)], dim=1)
         padded.append(x)
     return torch.cat(padded, dim=0).to(device)
 

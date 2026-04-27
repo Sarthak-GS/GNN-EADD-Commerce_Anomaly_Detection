@@ -126,7 +126,17 @@ def run_training(args):
     m_test = evaluate(gat, Z, A_rel, y, t_mask if t_mask.any() else None, "Test")
 
     Path(args.results_dir).mkdir(parents=True, exist_ok=True)
-    torch.save({'gae': gae.state_dict(), 'gat': gat.state_dict(), 'Z': Z.cpu(), 'metrics': m_test}, Path(args.results_dir) / 'checkpoint.pt')
+    torch.save({
+        'gae': gae.state_dict(),
+        'gat': gat.state_dict(),
+        'gae_state': gae.state_dict(),
+        'gat_state': gat.state_dict(),
+        'Z': Z.cpu(),
+        'metrics': m_test,
+        'gae_losses': gae_l,
+        'gat_history': gat_h,
+        'times': {'gae': gae_t, 'gat': gat_t},
+    }, Path(args.results_dir) / 'checkpoint.pt')
     
     m_test['gae_time'], m_test['gat_time'] = gae_t, gat_t
     return gae, gat, Z, A_rel, graph, m_test, H, A_norm

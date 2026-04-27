@@ -1,36 +1,10 @@
 
-/*
- * openmp_kernels.c — OpenMP CPU baseline for GNN-EADD Phase 2
- *
- * [Lec 2]  Shared Memory Parallel Architecture:
- *          All threads share the same address space and can read/write
- *          the same arrays.  OpenMP distributes loop iterations across
- *          CPU cores automatically.
- *
- * [Lec 20] Synchronization:
- *          - #pragma omp parallel for reduction(+:...) handles safe
- *            accumulation without explicit locks.
- *          - #pragma omp atomic handles scatter-add pattern.
- *
- * Compile: gcc -O3 -fopenmp -shared -fPIC -o openmp_kernels.so openmp_kernels.c
- */
 
 #include <math.h>
 #include <omp.h>
 #include <string.h>
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  OPERATION 1: SMOOTHNESS LOSS (Eq. 17)
- *  ─────────────────────────────────────────────────────────────────────────
- *  L_unsup = (1/E) * Σ_{e=(i,j)} (s_i - s_j)²
- *
- *  [Lec 2]  Each CPU thread processes a chunk of edges independently.
- *  [Lec 20] The reduction(+:total) clause ensures that partial sums
- *           from different threads are accumulated without races.
- *  [Lec 3]  This operation is fully parallelizable (parallel fraction
- *           ≈ 1.0 for the computation; the only sequential overhead is
- *           the final reduction which takes O(num_threads) time).
- * ═══════════════════════════════════════════════════════════════════════════ */
+
 
 double smoothness_loss_omp(
     const float* scores,     /* [N] anomaly scores */
@@ -40,12 +14,6 @@ double smoothness_loss_omp(
 {
     double total = 0.0;
 
-    /* [Lec 2] OpenMP parallel for with reduction:
-     * The loop iterations are distributed across available CPU cores.
-     * schedule(static) divides iterations equally — appropriate here
-     * because each iteration has equal work (one subtract + square).
-     * [Lec 20] reduction(+:total) creates private copies of 'total'
-     * per thread and sums them at the end, avoiding race conditions. */
     #pragma omp parallel for reduction(+:total) schedule(static)
     for (int e = 0; e < E; e++) {
         float diff = scores[row[e]] - scores[col[e]];
@@ -56,15 +24,6 @@ double smoothness_loss_omp(
 }
 
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  OPERATION 2: GAT ATTENTION SCORES (Eq. 12)
- *  ─────────────────────────────────────────────────────────────────────────
- *  e_ij = LeakyReLU( a^T [Wh_i || Wh_j] )
- *
- *  [Lec 2]  Each edge's attention score is independent — trivially parallel.
- *  [Lec 9]  Unlike GPUs, CPUs don't suffer from warp divergence, but the
- *           branch prediction unit handles the LeakyReLU conditional.
- * ═══════════════════════════════════════════════════════════════════════════ */
 
 void gat_attention_omp(
     const float* Wh,          /* [N, D] transformed features */
@@ -94,17 +53,6 @@ void gat_attention_omp(
 }
 
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  OPERATION 3: NEIGHBOR AGGREGATION (Eq. 7/13)
- *  ─────────────────────────────────────────────────────────────────────────
- *  out[dst][d] += alpha[e] * Wh[src][d]
- *
- *  [Lec 20] Synchronization challenge: multiple edges may target the same
- *           destination node, causing write conflicts.  We use
- *           #pragma omp atomic to serialize updates to each output cell.
- *  [Lec 1]  This is the fundamental parallelization challenge in GNNs:
- *           the scatter-add pattern on irregular graph structures.
- * ═══════════════════════════════════════════════════════════════════════════ */
 
 void neighbor_aggregation_omp(
     const float* Wh,          /* [N, D] source features */
@@ -134,16 +82,6 @@ void neighbor_aggregation_omp(
 }
 
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  OPERATION 4: MATRIX MULTIPLICATION (Feature Transformation)
- *  ─────────────────────────────────────────────════════════════════════════
- *  C[M,N] = A[M,K] × B[K,N]
- *
- *  [Lec 16-17] This is the CPU counterpart to the tiled CUDA kernel.
- *              We parallelize the outer loop (rows of A) across threads.
- *              No tiling/shared memory analogy on CPU, but each thread
- *              has its own L1/L2 cache that provides some locality.
- * ═══════════════════════════════════════════════════════════════════════════ */
 
 void matmul_omp(
     const float* A,   /* [M, K] */
